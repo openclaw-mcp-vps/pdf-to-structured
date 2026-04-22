@@ -1,150 +1,241 @@
 "use client";
 
-import { useCallback, useMemo, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
+import { useSearchParams } from "next/navigation";
+import { FileJson, LoaderCircle, ShieldCheck, UploadCloud } from "lucide-react";
 import { useDropzone } from "react-dropzone";
 
+import { JsonViewer } from "@/components/JsonViewer";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
 import { Input } from "@/components/ui/input";
-import type { PdfStructuredResponse } from "@/types/pdf-response";
+import type { ProcessedPdfResponse } from "@/types/pdf-data";
 
-type FileUploadProps = {
-  onProcessed: (data: PdfStructuredResponse) => void;
-};
+interface FileUploadProps {
+  paymentLink: string;
+}
 
-type InputMode = "file" | "url";
-
-export function FileUpload({ onProcessed }: FileUploadProps): JSX.Element {
-  const [mode, setMode] = useState<InputMode>("file");
-  const [selectedFile, setSelectedFile] = useState<File | null>(null);
+export function FileUpload({ paymentLink }: FileUploadProps) {
+  const searchParams = useSearchParams();
+  const [file, setFile] = useState<File | null>(null);
   const [url, setUrl] = useState("");
-  const [error, setError] = useState<string | null>(null);
-  const [isProcessing, setIsProcessing] = useState(false);
-  const [lastResult, setLastResult] = useState<PdfStructuredResponse | null>(null);
+  const [loading, setLoading] = useState(false);
+  const [unlocking, setUnlocking] = useState(false);
+  const [error, setError] = useState("");
+  const [result, setResult] = useState<ProcessedPdfResponse | null>(null);
+  const [hasAccess, setHasAccess] = useState(false);
+  const [checkedAccess, setCheckedAccess] = useState(false);
 
-  const onDrop = useCallback((acceptedFiles: File[]) => {
-    const [first] = acceptedFiles;
-    if (first) {
-      setSelectedFile(first);
-      setError(null);
+  const sessionId = searchParams.get("session_id");
+
+  useEffect(() => {
+    async function checkAccess() {
+      const response = await fetch("/api/access", { cache: "no-store" });
+      const data = (await response.json()) as { hasAccess?: boolean };
+      setHasAccess(Boolean(data.hasAccess));
+      setCheckedAccess(true);
     }
+
+    checkAccess().catch(() => {
+      setCheckedAccess(true);
+      setHasAccess(false);
+    });
   }, []);
+
+  useEffect(() => {
+    if (!sessionId) {
+      return;
+    }
+
+    setUnlocking(true);
+    setError("");
+
+    fetch("/api/access", {
+      method: "POST",
+      headers: {
+        "content-type": "application/json"
+      },
+      body: JSON.stringify({ sessionId })
+    })
+      .then(async (response) => {
+        const data = (await response.json()) as { hasAccess?: boolean; error?: string };
+        if (!response.ok) {
+          throw new Error(data.error ?? "Could not unlock access yet.");
+        }
+        setHasAccess(Boolean(data.hasAccess));
+      })
+      .catch((unlockError) => {
+        const message = unlockError instanceof Error ? unlockError.message : "Unlock failed.";
+        setError(message);
+      })
+      .finally(() => {
+        setUnlocking(false);
+      });
+  }, [sessionId]);
+
+  const onDrop = (acceptedFiles: File[]) => {
+    if (acceptedFiles.length > 0) {
+      setFile(acceptedFiles[0]);
+      setError("");
+    }
+  };
 
   const { getRootProps, getInputProps, isDragActive } = useDropzone({
     onDrop,
-    multiple: false,
     accept: {
       "application/pdf": [".pdf"]
-    }
+    },
+    multiple: false
   });
 
-  const pageCostCopy = useMemo(() => {
-    if (!lastResult) {
-      return null;
-    }
-    return `Processed ${lastResult.pageCount} page${lastResult.pageCount === 1 ? "" : "s"} at $${lastResult.estimatedCostUsd.toFixed(2)}.`;
-  }, [lastResult]);
+  const canProcess = useMemo(() => {
+    return Boolean(file || url.trim().length > 0);
+  }, [file, url]);
 
-  const submit = useCallback(async () => {
-    setIsProcessing(true);
-    setError(null);
+  async function submitPdf() {
+    if (!hasAccess) {
+      setError("Buy access first to unlock PDF processing.");
+      return;
+    }
+
+    if (!canProcess) {
+      setError("Upload a PDF file or add a PDF URL.");
+      return;
+    }
+
+    setLoading(true);
+    setError("");
+    setResult(null);
+
+    const formData = new FormData();
+    if (file) {
+      formData.append("file", file);
+    }
+    if (url.trim()) {
+      formData.append("url", url.trim());
+    }
 
     try {
-      const formData = new FormData();
-
-      if (mode === "file") {
-        if (!selectedFile) {
-          throw new Error("Choose a PDF file before processing.");
-        }
-        formData.append("file", selectedFile);
-      } else {
-        const trimmedUrl = url.trim();
-        if (!trimmedUrl) {
-          throw new Error("Paste a PDF URL before processing.");
-        }
-        formData.append("url", trimmedUrl);
-      }
-
       const response = await fetch("/api/process-pdf", {
         method: "POST",
         body: formData
       });
 
-      const payload = (await response.json().catch(() => ({ error: "Unexpected response from server." }))) as
-        | PdfStructuredResponse
-        | { error?: string };
+      const data = (await response.json()) as ProcessedPdfResponse & { error?: string };
 
       if (!response.ok) {
-        throw new Error("error" in payload ? payload.error || "Processing failed." : "Processing failed.");
+        throw new Error(data.error ?? "PDF processing failed.");
       }
 
-      if (!("sections" in payload)) {
-        throw new Error("Invalid response received from PDF processor.");
-      }
-
-      setLastResult(payload);
-      onProcessed(payload);
+      setResult(data);
     } catch (submitError) {
-      setError(submitError instanceof Error ? submitError.message : "PDF processing failed.");
+      const message = submitError instanceof Error ? submitError.message : "Unexpected error.";
+      setError(message);
     } finally {
-      setIsProcessing(false);
+      setLoading(false);
     }
-  }, [mode, onProcessed, selectedFile, url]);
+  }
 
   return (
-    <Card>
-      <CardHeader>
-        <CardTitle>Process a PDF</CardTitle>
-        <CardDescription>
-          Upload a file or paste a URL. The API extracts headings, paragraphs, list items, and table data into nested JSON.
-        </CardDescription>
-      </CardHeader>
-      <CardContent className="space-y-5">
-        <div className="grid grid-cols-2 gap-2">
-          <Button type="button" variant={mode === "file" ? "default" : "outline"} onClick={() => setMode("file")}>
-            Upload PDF
-          </Button>
-          <Button type="button" variant={mode === "url" ? "default" : "outline"} onClick={() => setMode("url")}>
-            Paste URL
-          </Button>
-        </div>
+    <div className="space-y-6">
+      <Card className="glass border-[#2f3744]">
+        <CardHeader>
+          <CardTitle className="flex items-center gap-2">
+            <FileJson className="h-5 w-5 text-[#3fb950]" />
+            PDF to Structured JSON
+          </CardTitle>
+          <CardDescription>
+            Upload a PDF or paste a public URL. Output includes hierarchical sections, paragraphs,
+            lists, and machine-friendly table arrays.
+          </CardDescription>
+        </CardHeader>
+        <CardContent className="space-y-5">
+          {!checkedAccess ? (
+            <div className="rounded-md border border-[#2f3744] bg-[#111822] p-3 text-sm text-[#94a3b8]">
+              Checking access status...
+            </div>
+          ) : null}
 
-        {mode === "file" ? (
+          {!hasAccess && checkedAccess ? (
+            <div className="rounded-md border border-[#3fb950] bg-[#102018] p-4 text-sm text-[#b7f0c0]">
+              <div className="flex items-start gap-3">
+                <ShieldCheck className="mt-0.5 h-4 w-4" />
+                <div className="space-y-3">
+                  <p>
+                    This extraction endpoint is paywalled. Purchase once, then return from Stripe
+                    with your `session_id` in the success URL to unlock this browser.
+                  </p>
+                  <a
+                    href={paymentLink}
+                    className="inline-flex h-9 items-center rounded-md bg-[#2ea043] px-4 font-medium text-white transition hover:bg-[#3fb950]"
+                    target="_blank"
+                    rel="noreferrer"
+                  >
+                    Buy Access
+                  </a>
+                </div>
+              </div>
+            </div>
+          ) : null}
+
+          {unlocking ? (
+            <div className="rounded-md border border-[#2f3744] bg-[#111822] p-3 text-sm text-[#94a3b8]">
+              Validating your purchase session...
+            </div>
+          ) : null}
+
           <div
             {...getRootProps()}
-            className={`cursor-pointer rounded-lg border border-dashed p-6 text-center transition ${
+            className={[
+              "cursor-pointer rounded-lg border border-dashed p-6 text-center transition",
               isDragActive
-                ? "border-cyan-400 bg-cyan-400/10 text-cyan-200"
-                : "border-slate-700 bg-slate-900/60 text-slate-300"
-            }`}
+                ? "border-[#3fb950] bg-[#102018]"
+                : "border-[#2f3744] bg-[#0d1117] hover:border-[#3fb950]/70"
+            ].join(" ")}
           >
             <input {...getInputProps()} />
-            <p className="text-sm font-medium">
-              {selectedFile ? `Selected: ${selectedFile.name}` : "Drop a PDF file here, or click to browse"}
+            <UploadCloud className="mx-auto mb-3 h-8 w-8 text-[#3fb950]" />
+            <p className="text-sm text-[#c9d1d9]">
+              {file
+                ? `Selected: ${file.name}`
+                : "Drop a PDF here or click to browse (max 30MB)"}
             </p>
-            <p className="mt-2 text-xs text-slate-500">Max file size: 25MB</p>
           </div>
-        ) : (
+
           <div className="space-y-2">
-            <label className="text-xs uppercase tracking-[0.18em] text-slate-400" htmlFor="pdf-url">
-              PDF URL
-            </label>
+            <label className="text-sm font-medium text-[#c9d1d9]">Or process by URL</label>
             <Input
-              id="pdf-url"
-              placeholder="https://example.com/invoice.pdf"
+              type="url"
+              placeholder="https://example.com/report.pdf"
               value={url}
               onChange={(event) => setUrl(event.target.value)}
             />
           </div>
-        )}
 
-        <Button type="button" size="lg" className="w-full" onClick={submit} disabled={isProcessing}>
-          {isProcessing ? "Extracting structured JSON..." : "Extract Structured JSON"}
-        </Button>
+          <Button onClick={submitPdf} disabled={!checkedAccess || loading || !canProcess || !hasAccess}>
+            {loading ? (
+              <>
+                <LoaderCircle className="mr-2 h-4 w-4 animate-spin" />
+                Processing PDF...
+              </>
+            ) : (
+              "Extract Structured JSON"
+            )}
+          </Button>
 
-        {pageCostCopy ? <p className="text-xs text-emerald-300">{pageCostCopy}</p> : null}
-        {error ? <p className="rounded-md border border-rose-800 bg-rose-900/30 p-3 text-sm text-rose-300">{error}</p> : null}
-      </CardContent>
-    </Card>
+          {error ? <p className="text-sm text-[#f85149]">{error}</p> : null}
+
+          {result ? (
+            <div className="rounded-md border border-[#2f3744] bg-[#0d1117] p-3 text-sm text-[#94a3b8]">
+              Processed <strong className="text-[#e6edf3]">{result.pricing.pages}</strong> page(s)
+              at <strong className="text-[#e6edf3]">${result.pricing.pricePerPage.toFixed(2)}</strong>{" "}
+              per page. Estimated cost: <strong className="text-[#3fb950]">${result.pricing.estimatedCost.toFixed(2)}</strong>
+            </div>
+          ) : null}
+        </CardContent>
+      </Card>
+
+      {result ? <JsonViewer data={result.result} /> : null}
+    </div>
   );
 }

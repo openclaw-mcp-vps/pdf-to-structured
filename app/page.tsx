@@ -1,173 +1,201 @@
-import Link from "next/link";
-import { cookies } from "next/headers";
+import { Suspense } from "react";
+import { ChevronRight, FileCog, FileSpreadsheet, ScanLine, ShieldCheck } from "lucide-react";
 
+import { FileUpload } from "@/components/FileUpload";
 import { PricingCard } from "@/components/PricingCard";
-import { ToolWorkspace } from "@/components/ToolWorkspace";
-import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
-import { isToolAccessGranted, TOOL_ACCESS_COOKIE } from "@/lib/lemonsqueezy";
+import { Badge } from "@/components/ui/badge";
 
-export const dynamic = "force-dynamic";
+const paymentLink = process.env.NEXT_PUBLIC_STRIPE_PAYMENT_LINK || "#";
 
-const problems = [
-  "PDFs mix headings, tables, and free text with inconsistent formatting across vendors and template versions.",
-  "Most enterprise document APIs force annual contracts, account setup friction, and expensive minimums.",
-  "OCR quality drops for scanned pages, causing broken table rows and flattened section context in downstream jobs."
-];
-
-const solutions = [
-  "Claude vision reads both digital and scanned PDFs, preserving structural context for nested JSON output.",
-  "Outputs include section hierarchy, paragraph blocks, list items, and normalized table arrays ready for ETL or RAG.",
-  "Transparent economics: $0.05/page pay-as-you-go or $29/month for 1,000 pages with browser-based unlock flow."
-];
-
-const faqs = [
+const faq = [
   {
-    question: "What does the extracted JSON contain?",
-    answer:
-      "Each response includes nested sections, paragraphs, lists, and table objects with headers and row arrays. You can feed it directly into job queues, vectorizers, or validators."
+    q: "Does this work on scanned PDFs and images embedded in PDFs?",
+    a: "Yes. The extractor is designed to use Claude vision when an API key is configured, so scanned pages and mixed-layout documents are parsed into structured blocks."
   },
   {
-    question: "How does scanned PDF support work?",
-    answer:
-      "The processor sends the PDF to Claude vision. If text extraction is weak, vision context still reconstructs layout and table structure, then returns JSON with confidence warnings."
+    q: "What JSON structure do I get back?",
+    a: "You get nested sections with heading levels, paragraph nodes, list nodes, and normalized table arrays. Metadata includes source, page count, timestamp, and model used."
   },
   {
-    question: "How is access controlled after payment?",
-    answer:
-      "Stripe sends a signed checkout webhook, your session ID is verified, and a browser cookie unlocks the processing endpoint for that user session."
+    q: "How do I unlock processing after payment?",
+    a: "Use a Stripe Payment Link success URL that returns users to this page with `?session_id={CHECKOUT_SESSION_ID}`. The app validates that session against your webhook feed and sets a secure cookie."
   },
   {
-    question: "Do I need to create an account?",
-    answer:
-      "No sign-up flow is required. Checkout with Stripe, unlock with your session ID, and start processing immediately."
+    q: "Is this suitable for production ingestion pipelines?",
+    a: "Yes. Responses are deterministic JSON, easy to validate and forward to ETL jobs, RAG chunkers, and downstream analytics workflows."
   }
 ];
 
-export default async function Home(): Promise<JSX.Element> {
-  const cookieStore = await cookies();
-  const accessToken = cookieStore.get(TOOL_ACCESS_COOKIE)?.value;
-  const unlocked = await isToolAccessGranted(accessToken);
-
+export default function HomePage() {
   return (
-    <main className="mx-auto w-full max-w-7xl px-4 pb-16 pt-8 sm:px-6 lg:px-8">
-      <section className="animate-rise-in grid gap-8 rounded-2xl border border-slate-800 bg-slate-950/80 p-6 sm:p-10 lg:grid-cols-[1.1fr_0.9fr] lg:items-center">
-        <div>
-          <p className="text-xs uppercase tracking-[0.25em] text-cyan-300">Document AI for Indie Builders</p>
-          <h1 className="mt-3 font-[var(--font-heading)] text-3xl font-bold leading-tight text-slate-50 sm:text-5xl">
-            PDF to Structured JSON
-            <span className="block text-cyan-300">Extract tables + hierarchy in one request.</span>
-          </h1>
-          <p className="mt-4 max-w-xl text-sm leading-relaxed text-slate-300 sm:text-base">
-            Upload any PDF or paste a URL. Get clean JSON with nested sections, list data, and normalized tables at a price
-            designed for real pipelines: $0.05/page.
+    <main className="mx-auto max-w-6xl px-4 pb-20 pt-10 md:px-8">
+      <section className="relative overflow-hidden rounded-2xl border border-[#2f3744] bg-[#111822]/80 p-8 shadow-[0_30px_100px_rgba(0,0,0,0.4)] md:p-12">
+        <div className="absolute -right-32 -top-32 h-72 w-72 rounded-full bg-[#2ea043]/20 blur-3xl" />
+        <div className="absolute -left-24 bottom-0 h-56 w-56 rounded-full bg-[#1f6feb]/20 blur-3xl" />
+
+        <Badge className="mb-5 border-[#2ea043] bg-[#11261a] text-[#8bff9e]">Document AI for Indie Builders</Badge>
+        <h1
+          className="max-w-3xl text-4xl font-semibold leading-tight text-[#e6edf3] md:text-6xl"
+          style={{ fontFamily: "var(--font-display)" }}
+        >
+          PDF to Structured JSON. Turn Any Document Into Pipeline-Ready Data.
+        </h1>
+        <p className="mt-6 max-w-2xl text-base text-[#94a3b8] md:text-lg">
+          Upload a file or paste a URL. Get clean JSON with section hierarchy, table rows,
+          paragraphs, and lists in one API call. Built for teams that need real extraction without
+          enterprise sales calls.
+        </p>
+        <div className="mt-8 flex flex-wrap items-center gap-3 text-sm text-[#c9d1d9]">
+          <div className="rounded-full border border-[#2f3744] bg-[#0d1117] px-3 py-1">$0.05 per page</div>
+          <div className="rounded-full border border-[#2f3744] bg-[#0d1117] px-3 py-1">$29/mo for 1000 pages</div>
+          <div className="rounded-full border border-[#2f3744] bg-[#0d1117] px-3 py-1">No signup wall</div>
+        </div>
+      </section>
+
+      <section className="mt-14 grid gap-4 md:grid-cols-3">
+        <article className="rounded-xl border border-[#2f3744] bg-[#161b22] p-6">
+          <h2 className="mb-2 text-lg font-semibold" style={{ fontFamily: "var(--font-display)" }}>
+            The Problem
+          </h2>
+          <p className="text-sm text-[#94a3b8]">
+            Existing document extraction platforms target enterprise buyers. Indie teams get hit with
+            minimum commitments, account manager friction, and inflexible contracts.
           </p>
+        </article>
+        <article className="rounded-xl border border-[#2f3744] bg-[#161b22] p-6">
+          <h2 className="mb-2 text-lg font-semibold" style={{ fontFamily: "var(--font-display)" }}>
+            The Solution
+          </h2>
+          <p className="text-sm text-[#94a3b8]">
+            This app extracts machine-ready structure from PDFs with vision support for scanned pages,
+            then returns deterministic JSON your backend can parse in seconds.
+          </p>
+        </article>
+        <article className="rounded-xl border border-[#2f3744] bg-[#161b22] p-6">
+          <h2 className="mb-2 text-lg font-semibold" style={{ fontFamily: "var(--font-display)" }}>
+            Who Pays
+          </h2>
+          <p className="text-sm text-[#94a3b8]">
+            Developers building ingestion pipelines, compliance tooling, RAG preprocessors, and
+            analytics automations that need dependable document structure.
+          </p>
+        </article>
+      </section>
 
-          <div className="mt-7 flex flex-col gap-3 sm:flex-row">
-            <Link
-              href="#tool"
-              className="inline-flex h-11 items-center justify-center rounded-md bg-cyan-400 px-6 text-sm font-semibold text-slate-950 transition hover:bg-cyan-300"
-            >
-              Start Extracting
-            </Link>
-            <Link
-              href="#pricing"
-              className="inline-flex h-11 items-center justify-center rounded-md border border-slate-700 bg-slate-900 px-6 text-sm font-semibold text-slate-100 transition hover:bg-slate-800"
-            >
-              See Pricing
-            </Link>
-          </div>
+      <section className="mt-14 grid gap-6 rounded-2xl border border-[#2f3744] bg-[#161b22]/85 p-6 md:grid-cols-2">
+        <div className="space-y-5">
+          <h2 className="text-2xl font-semibold" style={{ fontFamily: "var(--font-display)" }}>
+            Why teams switch from legacy extraction APIs
+          </h2>
+          <ul className="space-y-4 text-sm text-[#c9d1d9]">
+            <li className="flex items-start gap-3">
+              <ScanLine className="mt-0.5 h-4 w-4 text-[#3fb950]" />
+              Handles scanned PDFs and messy layouts with vision-first extraction.
+            </li>
+            <li className="flex items-start gap-3">
+              <FileSpreadsheet className="mt-0.5 h-4 w-4 text-[#3fb950]" />
+              Preserves tables as rows and headers instead of flattened text blobs.
+            </li>
+            <li className="flex items-start gap-3">
+              <FileCog className="mt-0.5 h-4 w-4 text-[#3fb950]" />
+              Returns hierarchical JSON for direct ETL and indexing.
+            </li>
+            <li className="flex items-start gap-3">
+              <ShieldCheck className="mt-0.5 h-4 w-4 text-[#3fb950]" />
+              Paywall and webhook validation included so billing is enforceable out of the box.
+            </li>
+          </ul>
         </div>
-
-        <div className="grid gap-3">
-          <div className="animate-pulse-border rounded-xl border border-cyan-900/60 bg-[#010409] p-4">
-            <p className="text-xs uppercase tracking-[0.2em] text-slate-400">Pipeline Snapshot</p>
-            <p className="mt-2 text-sm text-slate-200">Input: invoice-batch.pdf (42 pages)</p>
-            <p className="mt-1 text-sm text-slate-200">Output: 17 sections, 11 tables, 96 list items</p>
-            <p className="mt-1 text-sm text-emerald-300">Estimated cost: $2.10</p>
-          </div>
-          <div className="rounded-xl border border-slate-800 bg-slate-900/60 p-4">
-            <p className="text-sm text-slate-300">Best for:</p>
-            <p className="mt-1 text-sm text-slate-200">Contract parsing • Compliance ingestion • Procurement automation • Data room indexing</p>
-          </div>
+        <div className="rounded-xl border border-[#2f3744] bg-[#0d1117] p-5">
+          <h3 className="mb-3 text-lg font-semibold" style={{ fontFamily: "var(--font-display)" }}>
+            Output Example Shape
+          </h3>
+          <pre className="overflow-auto rounded-md border border-[#2f3744] bg-[#111822] p-4 text-xs text-[#94a3b8]">
+{`{
+  "metadata": { "pageCount": 12, "sourceType": "upload" },
+  "sections": [
+    {
+      "type": "section",
+      "heading": "3. Revenue Breakdown",
+      "level": 2,
+      "children": [
+        { "type": "paragraph", "text": "..." },
+        { "type": "table", "headers": ["Region", "Q1"], "rows": [["NA", "120000"]] }
+      ]
+    }
+  ]
+}`}
+          </pre>
         </div>
       </section>
 
-      <section className="mt-10 grid gap-5 lg:grid-cols-2">
-        <Card>
-          <CardHeader>
-            <CardTitle>Problem</CardTitle>
-            <CardDescription>Unstructured PDFs break downstream automation.</CardDescription>
-          </CardHeader>
-          <CardContent className="space-y-3">
-            {problems.map((problem) => (
-              <p key={problem} className="rounded-lg border border-slate-800 bg-slate-900/60 p-3 text-sm text-slate-300">
-                {problem}
-              </p>
-            ))}
-          </CardContent>
-        </Card>
-
-        <Card>
-          <CardHeader>
-            <CardTitle>Solution</CardTitle>
-            <CardDescription>Structure-first extraction tuned for developer workloads.</CardDescription>
-          </CardHeader>
-          <CardContent className="space-y-3">
-            {solutions.map((solution) => (
-              <p key={solution} className="rounded-lg border border-cyan-950 bg-cyan-950/20 p-3 text-sm text-cyan-100">
-                {solution}
-              </p>
-            ))}
-          </CardContent>
-        </Card>
-      </section>
-
-      <section id="tool" className="mt-10 scroll-mt-20">
-        <div className="mb-4 flex flex-col gap-2 sm:flex-row sm:items-end sm:justify-between">
-          <div>
-            <h2 className="font-[var(--font-heading)] text-2xl font-semibold text-slate-50">Extraction Workspace</h2>
-            <p className="text-sm text-slate-400">Run real documents through the parser and inspect the JSON payload before shipping it to production.</p>
-          </div>
-          <span className={`text-xs uppercase tracking-[0.2em] ${unlocked ? "text-emerald-300" : "text-amber-300"}`}>
-            {unlocked ? "Access unlocked" : "Locked until purchase"}
-          </span>
+      <section id="tool" className="mt-14">
+        <div className="mb-5 flex items-center justify-between">
+          <h2 className="text-2xl font-semibold" style={{ fontFamily: "var(--font-display)" }}>
+            Run the extractor
+          </h2>
+          <a href="#pricing" className="inline-flex items-center text-sm text-[#8bff9e] hover:underline">
+            See pricing <ChevronRight className="ml-1 h-4 w-4" />
+          </a>
         </div>
-
-        {unlocked ? (
-          <ToolWorkspace />
-        ) : (
-          <Card>
-            <CardHeader>
-              <CardTitle>Tool Access Locked</CardTitle>
-              <CardDescription>
-                Complete Stripe checkout, then use your Checkout Session ID to unlock processing in this browser.
-              </CardDescription>
-            </CardHeader>
-            <CardContent>
-              <p className="text-sm text-slate-300">
-                This paywall prevents abuse and keeps pricing low for independent developers running ingestion pipelines.
-              </p>
-            </CardContent>
-          </Card>
-        )}
+        <Suspense
+          fallback={
+            <div className="rounded-xl border border-[#2f3744] bg-[#161b22] p-6 text-sm text-[#94a3b8]">
+              Loading extractor...
+            </div>
+          }
+        >
+          <FileUpload paymentLink={paymentLink} />
+        </Suspense>
       </section>
 
-      <section id="pricing" className="mt-10 scroll-mt-20">
-        <PricingCard unlocked={unlocked} />
+      <section id="pricing" className="mt-14">
+        <h2 className="mb-6 text-2xl font-semibold" style={{ fontFamily: "var(--font-display)" }}>
+          Pricing
+        </h2>
+        <div className="grid gap-5 md:grid-cols-2">
+          <PricingCard
+            title="Pay As You Go"
+            price="$0.05/page"
+            subtitle="No monthly commitment. Ideal for variable workloads and prototyping."
+            features={[
+              "Process any PDF on-demand",
+              "Vision extraction for scanned pages",
+              "Cookie-unlocked tool after purchase",
+              "Flat predictable page billing"
+            ]}
+            ctaLabel="Start with Stripe Checkout"
+            ctaHref={paymentLink}
+            featured
+          />
+          <PricingCard
+            title="Builder Monthly"
+            price="$29/mo"
+            subtitle="Includes 1,000 pages/month. Effective rate: $0.029/page."
+            features={[
+              "Best for recurring ingestion pipelines",
+              "Lower blended cost at scale",
+              "Same extraction quality and JSON schema",
+              "Webhook-driven access validation"
+            ]}
+            ctaLabel="Choose Monthly Plan"
+            ctaHref={paymentLink}
+          />
+        </div>
       </section>
 
-      <section className="mt-10">
-        <h2 className="font-[var(--font-heading)] text-2xl font-semibold text-slate-50">FAQ</h2>
-        <div className="mt-4 grid gap-4 md:grid-cols-2">
-          {faqs.map((faq) => (
-            <Card key={faq.question}>
-              <CardHeader>
-                <CardTitle className="text-base">{faq.question}</CardTitle>
-              </CardHeader>
-              <CardContent>
-                <p className="text-sm leading-relaxed text-slate-300">{faq.answer}</p>
-              </CardContent>
-            </Card>
+      <section className="mt-14">
+        <h2 className="mb-6 text-2xl font-semibold" style={{ fontFamily: "var(--font-display)" }}>
+          FAQ
+        </h2>
+        <div className="space-y-4">
+          {faq.map((item) => (
+            <article key={item.q} className="rounded-xl border border-[#2f3744] bg-[#161b22] p-5">
+              <h3 className="text-base font-semibold text-[#e6edf3]" style={{ fontFamily: "var(--font-display)" }}>
+                {item.q}
+              </h3>
+              <p className="mt-2 text-sm text-[#94a3b8]">{item.a}</p>
+            </article>
           ))}
         </div>
       </section>

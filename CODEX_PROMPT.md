@@ -23,9 +23,9 @@ PLANNED FILES:
 - lib/claude.ts
 - lib/pdf-processor.ts
 - lib/lemonsqueezy.ts
-- types/pdf-response.ts
+- types/pdf-data.ts
 
-DEPENDENCIES: next, tailwindcss, @anthropic-ai/sdk, pdf-parse, @lemonsqueezy/lemonsqueezy.js, react-dropzone, react-json-view, stripe
+DEPENDENCIES: next, tailwindcss, @anthropic-ai/sdk, pdf-parse, @lemonsqueezy/lemonsqueezy.js, react-dropzone, react-json-view, stripe, prisma, @prisma/client
 
 REQUIREMENTS:
 - Next.js 15 with App Router (app/ directory)

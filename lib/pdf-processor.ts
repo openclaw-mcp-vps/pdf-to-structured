@@ -1,133 +1,253 @@
-import { PDFParse } from "pdf-parse";
+import pdfParse from "pdf-parse";
 
-import { extractStructuredWithClaude } from "@/lib/claude";
-import type { PdfStructuredResponse } from "@/types/pdf-response";
+import {
+  CLAUDE_MODEL_NAME,
+  extractStructuredWithClaude
+} from "@/lib/claude";
+import type {
+  PdfContentNode,
+  PdfSection,
+  PdfTable,
+  ProcessedPdfResponse,
+  StructuredPdfResult
+} from "@/types/pdf-data";
 
-type ProcessPdfInput = {
-  pdfBuffer: Buffer;
-  source: string;
-};
+const PRICE_PER_PAGE = 0.05;
 
-const MAX_PDF_BYTES = 25 * 1024 * 1024;
-const PRICE_PER_PAGE_USD = 0.05;
-
-function sanitizeSource(source: string): string {
-  return source.replace(/\s+/g, " ").trim();
+function normalizeWhitespace(value: string): string {
+  return value.replace(/[\t ]+/g, " ").replace(/\n{3,}/g, "\n\n").trim();
 }
 
-function clampPageCount(value: number): number {
-  if (!Number.isFinite(value) || value < 1) {
-    return 1;
+function looksLikeHeading(line: string): boolean {
+  const clean = line.trim();
+  if (!clean || clean.length > 90) {
+    return false;
   }
-  return Math.max(1, Math.floor(value));
+
+  if (/^\d+(\.\d+)*\s+/.test(clean)) {
+    return true;
+  }
+
+  if (/^[A-Z0-9\s\-:]{4,}$/.test(clean) && /[A-Z]/.test(clean)) {
+    return true;
+  }
+
+  return /^[A-Z][\w\s,&\-:]{2,}$/.test(clean) && !/[.!?]$/.test(clean);
 }
 
-function sanitizeForResponse(result: PdfStructuredResponse): PdfStructuredResponse {
+function inferHeadingLevel(line: string): number {
+  const numbered = line.match(/^(\d+(?:\.\d+)*)\s+/);
+  if (!numbered) {
+    return line.length < 32 ? 1 : 2;
+  }
+  return Math.min(numbered[1].split(".").length, 4);
+}
+
+function parseDelimitedTable(block: string): PdfTable | null {
+  const lines = block
+    .split("\n")
+    .map((line) => line.trim())
+    .filter(Boolean);
+
+  const pipeLines = lines.filter((line) => line.includes("|"));
+  if (pipeLines.length < 2) {
+    return null;
+  }
+
+  const parsed = pipeLines
+    .map((line) =>
+      line
+        .split("|")
+        .map((cell) => cell.trim())
+        .filter(Boolean)
+    )
+    .filter((row) => row.length > 1);
+
+  if (parsed.length < 2) {
+    return null;
+  }
+
+  const headers = parsed[0];
+  const rows = parsed.slice(1).filter((row) => row.length === headers.length);
+
+  if (!rows.length) {
+    return null;
+  }
+
   return {
-    ...result,
-    source: sanitizeSource(result.source),
-    pageCount: clampPageCount(result.pageCount),
-    estimatedCostUsd: Number(result.estimatedCostUsd.toFixed(2)),
-    warnings: result.warnings.map((warning) => warning.trim()).filter(Boolean)
+    type: "table",
+    headers,
+    rows
   };
 }
 
-export function assertPdfSize(pdfBuffer: Buffer): void {
-  if (pdfBuffer.byteLength > MAX_PDF_BYTES) {
-    throw new Error("PDF is too large. The maximum supported size is 25MB per document.");
+function parseList(block: string): PdfContentNode | null {
+  const lines = block
+    .split("\n")
+    .map((line) => line.trim())
+    .filter(Boolean);
+
+  if (!lines.length) {
+    return null;
   }
+
+  const ordered = lines.every((line) => /^\d+[.)]\s+/.test(line));
+  const unordered = lines.every((line) => /^[-*•]\s+/.test(line));
+
+  if (!ordered && !unordered) {
+    return null;
+  }
+
+  const items = lines.map((line) => line.replace(/^([-*•]|\d+[.)])\s+/, "").trim());
+
+  return {
+    type: "list",
+    ordered,
+    items
+  };
 }
 
-export async function fetchPdfBufferFromUrl(url: string): Promise<{ buffer: Buffer; source: string }> {
-  const parsed = new URL(url);
-  if (!["http:", "https:"].includes(parsed.protocol)) {
-    throw new Error("Only HTTP(S) URLs are supported.");
+function fallbackStructureFromText(text: string): Pick<StructuredPdfResult, "sections" | "tables"> {
+  const normalized = normalizeWhitespace(text);
+  const blocks = normalized.split(/\n\n+/);
+
+  const sections: PdfSection[] = [];
+  const tables: PdfTable[] = [];
+
+  let current: PdfSection = {
+    type: "section",
+    heading: "Document",
+    level: 1,
+    children: []
+  };
+
+  for (const block of blocks) {
+    const firstLine = block.split("\n")[0]?.trim() ?? "";
+
+    if (looksLikeHeading(firstLine)) {
+      if (current.children.length > 0 || sections.length === 0) {
+        sections.push(current);
+      }
+      current = {
+        type: "section",
+        heading: firstLine,
+        level: inferHeadingLevel(firstLine),
+        children: []
+      };
+      const remainder = block
+        .split("\n")
+        .slice(1)
+        .join("\n")
+        .trim();
+      if (remainder) {
+        current.children.push({ type: "paragraph", text: remainder });
+      }
+      continue;
+    }
+
+    const asTable = parseDelimitedTable(block);
+    if (asTable) {
+      current.children.push(asTable);
+      tables.push(asTable);
+      continue;
+    }
+
+    const asList = parseList(block);
+    if (asList) {
+      current.children.push(asList);
+      continue;
+    }
+
+    current.children.push({ type: "paragraph", text: block });
   }
 
-  const response = await fetch(parsed.toString(), {
-    method: "GET",
+  if (current.children.length > 0) {
+    sections.push(current);
+  }
+
+  if (!sections.length) {
+    sections.push({
+      type: "section",
+      heading: "Document",
+      level: 1,
+      children: [{ type: "paragraph", text: normalized }]
+    });
+  }
+
+  return { sections, tables };
+}
+
+export async function fetchPdfFromUrl(url: string): Promise<Buffer> {
+  let parsed: URL;
+  try {
+    parsed = new URL(url);
+  } catch {
+    throw new Error("Invalid URL. Please provide a full http(s) URL.");
+  }
+
+  if (!["https:", "http:"].includes(parsed.protocol)) {
+    throw new Error("Only http and https URLs are supported.");
+  }
+
+  const response = await fetch(parsed, {
     headers: {
-      Accept: "application/pdf"
+      "user-agent": "pdf-to-structured/1.0"
     }
   });
 
   if (!response.ok) {
-    throw new Error(`Failed to fetch PDF URL (${response.status}).`);
-  }
-
-  const contentLength = Number(response.headers.get("content-length") || "0");
-  if (contentLength > MAX_PDF_BYTES) {
-    throw new Error("The remote PDF is larger than 25MB.");
-  }
-
-  const contentType = response.headers.get("content-type") || "";
-  if (!contentType.includes("pdf") && !parsed.pathname.toLowerCase().endsWith(".pdf")) {
-    throw new Error("The provided URL does not appear to be a PDF.");
+    throw new Error(`Could not fetch PDF URL. HTTP ${response.status}.`);
   }
 
   const arrayBuffer = await response.arrayBuffer();
   const buffer = Buffer.from(arrayBuffer);
-  assertPdfSize(buffer);
+
+  if (buffer.length === 0) {
+    throw new Error("Fetched file is empty.");
+  }
+
+  if (buffer.length > 30 * 1024 * 1024) {
+    throw new Error("PDF is too large. Maximum size is 30MB.");
+  }
+
+  return buffer;
+}
+
+export async function processPdfBuffer(params: {
+  buffer: Buffer;
+  sourceType: "upload" | "url";
+  sourceName: string;
+}): Promise<ProcessedPdfResponse> {
+  const parsed = await pdfParse(params.buffer);
+  const pageCount = Math.max(parsed.numpages || 1, 1);
+  const fallback = fallbackStructureFromText(parsed.text || "");
+
+  const claudeOutput = await extractStructuredWithClaude({
+    pdfBase64: params.buffer.toString("base64"),
+    sourceName: params.sourceName,
+    fallbackText: parsed.text || ""
+  }).catch(() => null);
+
+  const structured = claudeOutput ?? fallback;
+
+  const result: StructuredPdfResult = {
+    metadata: {
+      sourceType: params.sourceType,
+      sourceName: params.sourceName,
+      pageCount,
+      model: claudeOutput ? CLAUDE_MODEL_NAME : "local-fallback-parser",
+      generatedAt: new Date().toISOString()
+    },
+    sections: structured.sections,
+    tables: structured.tables
+  };
 
   return {
-    buffer,
-    source: parsed.toString()
-  };
-}
-
-async function extractPdfTextAndPageCount(pdfBuffer: Buffer): Promise<{ text: string; pageCount: number }> {
-  const parser = new PDFParse({ data: pdfBuffer });
-
-  try {
-    const textResult = await parser.getText();
-    return {
-      text: textResult.text?.trim() || "",
-      pageCount: clampPageCount(textResult.total || textResult.pages?.length || 1)
-    };
-  } finally {
-    await parser.destroy().catch(() => undefined);
-  }
-}
-
-export async function processPdfBuffer({ pdfBuffer, source }: ProcessPdfInput): Promise<PdfStructuredResponse> {
-  assertPdfSize(pdfBuffer);
-
-  let extractedText = "";
-  let pageCount = 1;
-
-  try {
-    const extracted = await extractPdfTextAndPageCount(pdfBuffer);
-    extractedText = extracted.text;
-    pageCount = extracted.pageCount;
-  } catch (error) {
-    extractedText = "";
-    pageCount = 1;
-    console.warn("pdf-parse failed, relying on Claude vision", error);
-  }
-
-  const structured = await extractStructuredWithClaude({
-    pdfBuffer,
-    rawText: extractedText,
-    source,
-    pageCount
-  });
-
-  const response: PdfStructuredResponse = {
-    documentTitle: structured.documentTitle,
-    source: sanitizeSource(source),
-    pageCount,
-    estimatedCostUsd: Number((pageCount * PRICE_PER_PAGE_USD).toFixed(2)),
-    processedAt: new Date().toISOString(),
-    sections: structured.sections,
-    tables: structured.tables,
-    warnings: structured.warnings,
-    model: {
-      provider: structured.fallback ? "local-heuristic" : "anthropic",
-      name: structured.modelName,
-      usedVision: structured.usedVision,
-      fallback: structured.fallback
+    result,
+    pricing: {
+      pricePerPage: PRICE_PER_PAGE,
+      pages: pageCount,
+      estimatedCost: Number((pageCount * PRICE_PER_PAGE).toFixed(2))
     }
   };
-
-  return sanitizeForResponse(response);
 }

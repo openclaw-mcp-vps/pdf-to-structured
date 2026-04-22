@@ -1,57 +1,64 @@
 import type { Metadata } from "next";
-import { IBM_Plex_Mono, Space_Grotesk } from "next/font/google";
+import { Space_Grotesk, Source_Serif_4 } from "next/font/google";
 
-import "@/app/globals.css";
+import "./globals.css";
 
-const headingFont = Space_Grotesk({
+const spaceGrotesk = Space_Grotesk({
+  variable: "--font-display",
   subsets: ["latin"],
-  variable: "--font-heading",
-  display: "swap"
+  weight: ["400", "500", "600", "700"]
 });
 
-const bodyFont = IBM_Plex_Mono({
-  subsets: ["latin"],
+const sourceSerif = Source_Serif_4({
   variable: "--font-body",
-  weight: ["400", "500", "600"],
-  display: "swap"
+  subsets: ["latin"],
+  weight: ["400", "500", "600"]
 });
 
 export const metadata: Metadata = {
-  title: "PDF to Structured JSON | Tables + Hierarchical Sections",
+  metadataBase: new URL("https://pdf-to-structured.app"),
+  title: "PDF to Structured JSON | Extract Tables, Headings, and Lists",
   description:
-    "Upload any PDF or paste a URL and extract clean nested JSON with headings, paragraphs, lists, and table rows. Built for document pipelines at $0.05/page.",
+    "Upload any PDF or paste a URL to get production-ready structured JSON with tables, hierarchical sections, lists, and paragraphs.",
   keywords: [
     "pdf to json",
     "document ai",
     "table extraction",
-    "ocr pdf",
-    "anthropic claude vision",
-    "structured data extraction"
+    "claude vision",
+    "structured data"
   ],
   openGraph: {
     title: "PDF to Structured JSON",
     description:
-      "Turn PDFs into clean nested JSON with table extraction, heading hierarchy, and list parsing for production pipelines.",
-    type: "website",
-    url: "https://pdf-to-structured.dev",
-    siteName: "PDF to Structured JSON"
+      "Transform messy PDFs into clean nested JSON with page-level metadata, section hierarchy, and extracted tables.",
+    url: "https://pdf-to-structured.app",
+    siteName: "pdf-to-structured",
+    type: "website"
   },
   twitter: {
     card: "summary_large_image",
     title: "PDF to Structured JSON",
-    description: "Convert PDFs into production-ready structured JSON at $0.05/page."
+    description: "Upload PDF, receive clean nested JSON with table and section extraction."
   },
-  metadataBase: new URL("https://pdf-to-structured.dev")
+  robots: {
+    index: true,
+    follow: true
+  }
 };
 
 export default function RootLayout({
   children
 }: Readonly<{
   children: React.ReactNode;
-}>): JSX.Element {
+}>) {
   return (
-    <html lang="en" className={`${headingFont.variable} ${bodyFont.variable}`}>
-      <body className="font-[var(--font-body)] antialiased">{children}</body>
+    <html lang="en" className="dark">
+      <body
+        className={`${spaceGrotesk.variable} ${sourceSerif.variable} antialiased`}
+        style={{ fontFamily: "var(--font-body)" }}
+      >
+        {children}
+      </body>
     </html>
   );
 }

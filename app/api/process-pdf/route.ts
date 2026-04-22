@@ -1,80 +1,75 @@
-import { NextResponse, type NextRequest } from "next/server";
+import { cookies } from "next/headers";
+import { NextResponse } from "next/server";
 
-import { isToolAccessGranted, TOOL_ACCESS_COOKIE } from "@/lib/lemonsqueezy";
-import { fetchPdfBufferFromUrl, processPdfBuffer } from "@/lib/pdf-processor";
+import { ACCESS_COOKIE_NAME, hasPaidAccessCookie } from "@/lib/lemonsqueezy";
+import { fetchPdfFromUrl, processPdfBuffer } from "@/lib/pdf-processor";
 
 export const runtime = "nodejs";
 
-function getFileName(fileName: string | undefined): string {
-  if (!fileName) {
-    return "uploaded.pdf";
-  }
-  return fileName.replace(/[^a-zA-Z0-9._-]/g, "-");
-}
+export async function POST(request: Request) {
+  try {
+    const cookieStore = await cookies();
+    const accessToken = cookieStore.get(ACCESS_COOKIE_NAME)?.value;
+    const hasAccess = await hasPaidAccessCookie(accessToken);
 
-async function parseIncomingPdf(request: NextRequest): Promise<{ buffer: Buffer; source: string }> {
-  const contentType = request.headers.get("content-type") || "";
+    if (!hasAccess) {
+      return NextResponse.json(
+        { error: "Purchase required before processing PDFs." },
+        { status: 402 }
+      );
+    }
 
-  if (contentType.includes("multipart/form-data")) {
     const formData = await request.formData();
-    const fileEntry = formData.get("file");
-    const urlEntry = String(formData.get("url") || "").trim();
+    const file = formData.get("file");
+    const url = formData.get("url");
 
-    if (fileEntry instanceof File && fileEntry.size > 0) {
-      if (fileEntry.type && !fileEntry.type.includes("pdf")) {
-        throw new Error("Only PDF files are supported.");
+    let buffer: Buffer;
+    let sourceType: "upload" | "url";
+    let sourceName: string;
+
+    if (file instanceof File) {
+      if (file.size === 0) {
+        return NextResponse.json({ error: "Uploaded file is empty." }, { status: 400 });
       }
 
-      const arrayBuffer = await fileEntry.arrayBuffer();
-      return {
-        buffer: Buffer.from(arrayBuffer),
-        source: getFileName(fileEntry.name)
-      };
+      if (file.size > 30 * 1024 * 1024) {
+        return NextResponse.json(
+          { error: "File is too large. Maximum file size is 30MB." },
+          { status: 400 }
+        );
+      }
+
+      if (!file.type.includes("pdf") && !file.name.toLowerCase().endsWith(".pdf")) {
+        return NextResponse.json(
+          { error: "Only PDF uploads are supported." },
+          { status: 400 }
+        );
+      }
+
+      const arrayBuffer = await file.arrayBuffer();
+      buffer = Buffer.from(arrayBuffer);
+      sourceType = "upload";
+      sourceName = file.name;
+    } else if (typeof url === "string" && url.trim().length > 0) {
+      buffer = await fetchPdfFromUrl(url.trim());
+      sourceType = "url";
+      sourceName = url.trim();
+    } else {
+      return NextResponse.json(
+        { error: "Upload a PDF file or provide a PDF URL." },
+        { status: 400 }
+      );
     }
 
-    if (urlEntry) {
-      return fetchPdfBufferFromUrl(urlEntry);
-    }
-
-    throw new Error("Please upload a PDF file or provide a PDF URL.");
-  }
-
-  const body = (await request.json()) as { url?: string };
-  const url = body?.url?.trim();
-  if (!url) {
-    throw new Error("Missing PDF URL.");
-  }
-
-  return fetchPdfBufferFromUrl(url);
-}
-
-export async function POST(request: NextRequest): Promise<NextResponse> {
-  const accessToken = request.cookies.get(TOOL_ACCESS_COOKIE)?.value;
-  const hasAccess = await isToolAccessGranted(accessToken);
-
-  if (!hasAccess) {
-    return NextResponse.json(
-      {
-        error: "Purchase required. Complete checkout, then unlock the tool with your Stripe session ID."
-      },
-      { status: 402 }
-    );
-  }
-
-  try {
-    const { buffer, source } = await parseIncomingPdf(request);
-    const result = await processPdfBuffer({
-      pdfBuffer: buffer,
-      source
+    const response = await processPdfBuffer({
+      buffer,
+      sourceType,
+      sourceName
     });
 
-    return NextResponse.json(result, { status: 200 });
+    return NextResponse.json(response);
   } catch (error) {
-    return NextResponse.json(
-      {
-        error: error instanceof Error ? error.message : "PDF processing failed."
-      },
-      { status: 400 }
-    );
+    const message = error instanceof Error ? error.message : "Failed to process PDF.";
+    return NextResponse.json({ error: message }, { status: 500 });
   }
 }
