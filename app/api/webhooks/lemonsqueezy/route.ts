@@ -1,59 +1,48 @@
+import Stripe from "stripe";
 import { NextResponse } from "next/server";
-import { addOrUpdatePurchase } from "@/lib/database";
-import { normalizeEmail, verifyStripeWebhookSignature } from "@/lib/lemonsqueezy";
+
+import { saveCompletedCheckoutSession } from "@/lib/lemonsqueezy";
 
 export const runtime = "nodejs";
 
-interface StripeCheckoutSession {
-  id: string;
-  mode?: "payment" | "subscription" | string;
-  customer_email?: string | null;
-  customer_details?: {
-    email?: string | null;
-  };
-}
+const stripe = new Stripe(process.env.STRIPE_SECRET_KEY || "sk_test_placeholder");
 
-interface StripeEvent {
-  id: string;
-  type: string;
-  data: {
-    object: StripeCheckoutSession;
-  };
-}
-
-export async function POST(request: Request) {
-  const body = await request.text();
-
-  try {
-    verifyStripeWebhookSignature(body, request.headers.get("stripe-signature"));
-  } catch (error) {
-    const message = error instanceof Error ? error.message : "Invalid webhook signature.";
-    return NextResponse.json({ error: message }, { status: 400 });
+export async function POST(request: Request): Promise<NextResponse> {
+  const webhookSecret = process.env.STRIPE_WEBHOOK_SECRET;
+  if (!webhookSecret) {
+    return NextResponse.json({ error: "STRIPE_WEBHOOK_SECRET is not configured." }, { status: 500 });
   }
 
-  try {
-    const event = JSON.parse(body) as StripeEvent;
-
-    if (event.type === "checkout.session.completed" || event.type === "checkout.session.async_payment_succeeded") {
-      const session = event.data.object;
-      const email = session.customer_details?.email ?? session.customer_email;
-
-      if (email) {
-        await addOrUpdatePurchase({
-          email: normalizeEmail(email),
-          source: "stripe",
-          mode: session.mode === "subscription" ? "subscription" : "payg",
-          purchasedAt: new Date().toISOString(),
-          eventId: event.id,
-          checkoutSessionId: session.id
-        });
-      }
-    }
-
-    return NextResponse.json({ received: true });
-  } catch (error) {
-    const message = error instanceof Error ? error.message : "Webhook handler failed.";
-    return NextResponse.json({ error: message }, { status: 500 });
+  const signature = request.headers.get("stripe-signature");
+  if (!signature) {
+    return NextResponse.json({ error: "Missing stripe-signature header." }, { status: 400 });
   }
-}
 
+  const payload = await request.text();
+
+  let event: Stripe.Event;
+  try {
+    event = stripe.webhooks.constructEvent(payload, signature, webhookSecret);
+  } catch (error) {
+    return NextResponse.json(
+      {
+        error: `Invalid webhook signature: ${error instanceof Error ? error.message : "unknown error"}`
+      },
+      { status: 400 }
+    );
+  }
+
+  if (event.type === "checkout.session.completed") {
+    const session = event.data.object as Stripe.Checkout.Session;
+    await saveCompletedCheckoutSession({
+      sessionId: session.id,
+      customerEmail: session.customer_details?.email ?? session.customer_email ?? null,
+      amountTotal: session.amount_total ?? null,
+      currency: session.currency ?? null,
+      completedAt: new Date().toISOString(),
+      mode: session.mode === "subscription" ? "subscription" : "payment"
+    });
+  }
+
+  return NextResponse.json({ received: true }, { status: 200 });
+}

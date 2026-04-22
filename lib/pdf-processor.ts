@@ -1,354 +1,133 @@
-import crypto from "node:crypto";
-import os from "node:os";
-import path from "node:path";
-import { mkdir, readFile, rm, unlink, writeFile } from "node:fs/promises";
-import pdf from "pdf-parse";
-import { fromPath } from "pdf2pic";
-import { ensureUploadDirectory } from "@/lib/database";
-import { extractStructuredWithClaude, type StructuredDocument, type JsonSection, type JsonTable } from "@/lib/claude-client";
+import { PDFParse } from "pdf-parse";
 
-const MAX_VISION_PAGES = 8;
+import { extractStructuredWithClaude } from "@/lib/claude";
+import type { PdfStructuredResponse } from "@/types/pdf-response";
+
+type ProcessPdfInput = {
+  pdfBuffer: Buffer;
+  source: string;
+};
+
+const MAX_PDF_BYTES = 25 * 1024 * 1024;
 const PRICE_PER_PAGE_USD = 0.05;
 
-export interface UploadReceipt {
-  uploadId: string;
-  fileName: string;
-  pageCount: number;
-  bytes: number;
+function sanitizeSource(source: string): string {
+  return source.replace(/\s+/g, " ").trim();
 }
 
-interface LoadedPdf {
-  buffer: Buffer;
-  sourceName: string;
-}
-
-function safeUploadPath(uploadId: string): string {
-  if (!/^[a-f0-9-]{20,80}$/i.test(uploadId)) {
-    throw new Error("Invalid upload identifier.");
-  }
-
-  return path.join(process.cwd(), ".uploads", `${uploadId}.pdf`);
-}
-
-function isLikelyHeading(line: string): boolean {
-  if (line.length > 120) {
-    return false;
-  }
-
-  if (/^\d+(\.\d+)*\s+/.test(line)) {
-    return true;
-  }
-
-  const uppercaseRatio = line.replace(/[^A-Z]/g, "").length / Math.max(line.length, 1);
-  if (uppercaseRatio > 0.65 && line.length >= 4) {
-    return true;
-  }
-
-  return /^([A-Z][A-Za-z0-9]+(\s+[A-Z][A-Za-z0-9]+){0,8})$/.test(line);
-}
-
-function headingLevel(line: string): number {
-  const matched = line.match(/^(\d+(?:\.\d+)*)\s+/);
-  if (!matched) {
+function clampPageCount(value: number): number {
+  if (!Number.isFinite(value) || value < 1) {
     return 1;
   }
-
-  return Math.min(4, matched[1].split(".").length);
+  return Math.max(1, Math.floor(value));
 }
 
-function parsePipeTable(line: string): string[] | null {
-  if (!line.includes("|")) {
-    return null;
-  }
-
-  const cells = line
-    .split("|")
-    .map((part) => part.trim())
-    .filter(Boolean);
-
-  return cells.length >= 2 ? cells : null;
-}
-
-function buildFallbackStructure(text: string, sourceName: string, pageCount: number, scanned: boolean): StructuredDocument {
-  const lines = text
-    .split(/\r?\n/)
-    .map((line) => line.trim())
-    .filter(Boolean);
-
-  const topSections: JsonSection[] = [];
-  const sectionStack: JsonSection[] = [];
-  const globalTables: JsonTable[] = [];
-  let sectionCounter = 0;
-  let tableCounter = 0;
-
-  function createSection(heading: string, level: number): JsonSection {
-    sectionCounter += 1;
-    return {
-      id: `sec-${sectionCounter}`,
-      heading,
-      level,
-      paragraphs: [],
-      lists: [],
-      tables: [],
-      children: []
-    };
-  }
-
-  let currentSection = createSection("Document Overview", 1);
-  topSections.push(currentSection);
-  sectionStack.push(currentSection);
-
-  let activeTable: JsonTable | null = null;
-
-  for (const line of lines) {
-    const maybeTableRow = parsePipeTable(line);
-    if (maybeTableRow) {
-      if (!activeTable) {
-        tableCounter += 1;
-        activeTable = {
-          id: `tbl-${tableCounter}`,
-          title: `Table ${tableCounter}`,
-          columns: maybeTableRow,
-          rows: [],
-          sourceSectionId: currentSection.id
-        };
-        currentSection.tables.push(activeTable);
-        globalTables.push(activeTable);
-      } else {
-        activeTable.rows.push(maybeTableRow);
-      }
-      continue;
-    }
-
-    activeTable = null;
-
-    if (isLikelyHeading(line)) {
-      const level = headingLevel(line);
-      const newSection = createSection(line.replace(/^\d+(\.\d+)*\s+/, ""), level);
-
-      while (sectionStack.length > 0 && sectionStack[sectionStack.length - 1].level >= level) {
-        sectionStack.pop();
-      }
-
-      const parent = sectionStack[sectionStack.length - 1];
-      if (parent) {
-        parent.children.push(newSection);
-      } else {
-        topSections.push(newSection);
-      }
-
-      sectionStack.push(newSection);
-      currentSection = newSection;
-      continue;
-    }
-
-    const listMatch = line.match(/^([-*•]|\d+[.)])\s+(.+)/);
-    if (listMatch) {
-      const ordered = /^\d/.test(listMatch[1]);
-      const lastList = currentSection.lists[currentSection.lists.length - 1];
-      if (lastList && lastList.ordered === ordered) {
-        lastList.items.push(listMatch[2]);
-      } else {
-        currentSection.lists.push({
-          ordered,
-          items: [listMatch[2]]
-        });
-      }
-      continue;
-    }
-
-    currentSection.paragraphs.push(line);
-  }
-
-  const firstParagraph =
-    topSections
-      .flatMap((section) => [section.paragraphs[0], ...section.children.flatMap((child) => child.paragraphs)])
-      .find((line) => typeof line === "string" && line.length > 20) ?? "Document parsed with fallback extraction.";
-
+function sanitizeForResponse(result: PdfStructuredResponse): PdfStructuredResponse {
   return {
-    document: {
-      title: sourceName,
-      sourceName,
-      pageCount,
-      detectedLanguage: "unknown",
-      summary: firstParagraph,
-      sections: topSections,
-      tables: globalTables,
-      metadata: {
-        extractedAt: new Date().toISOString(),
-        model: "fallback-parser",
-        scanned,
-        fallbackUsed: true,
-        textCharacters: text.length,
-        inputImageCount: 0
-      }
-    }
+    ...result,
+    source: sanitizeSource(result.source),
+    pageCount: clampPageCount(result.pageCount),
+    estimatedCostUsd: Number(result.estimatedCostUsd.toFixed(2)),
+    warnings: result.warnings.map((warning) => warning.trim()).filter(Boolean)
   };
 }
 
-async function renderPdfPagesForVision(buffer: Buffer, pageCount: number): Promise<string[]> {
-  const targetPages = Math.min(pageCount, MAX_VISION_PAGES);
-  if (targetPages <= 0) {
-    return [];
-  }
-
-  const tempRoot = path.join(os.tmpdir(), "pdf-to-structured");
-  await mkdir(tempRoot, { recursive: true });
-  const tempDir = path.join(tempRoot, crypto.randomUUID());
-  await mkdir(tempDir, { recursive: true });
-  const sourcePath = path.join(tempDir, "source.pdf");
-
-  try {
-    await writeFile(sourcePath, buffer);
-    const converter = fromPath(sourcePath, {
-      density: 180,
-      saveFilename: "page",
-      savePath: tempDir,
-      format: "png",
-      width: 1240,
-      height: 1754
-    });
-
-    const images: string[] = [];
-    for (let pageNumber = 1; pageNumber <= targetPages; pageNumber += 1) {
-      const rendered = (await converter(pageNumber, { responseType: "base64" })) as { base64?: string } | undefined;
-      if (rendered?.base64) {
-        images.push(rendered.base64);
-      }
-    }
-
-    return images;
-  } finally {
-    await rm(tempDir, { recursive: true, force: true });
+export function assertPdfSize(pdfBuffer: Buffer): void {
+  if (pdfBuffer.byteLength > MAX_PDF_BYTES) {
+    throw new Error("PDF is too large. The maximum supported size is 25MB per document.");
   }
 }
 
-function calculatePriceEstimate(pageCount: number): number {
-  return Number((pageCount * PRICE_PER_PAGE_USD).toFixed(2));
-}
-
-export async function storeUploadedPdf(file: File): Promise<UploadReceipt> {
-  if (!file.name.toLowerCase().endsWith(".pdf")) {
-    throw new Error("Only PDF files are supported.");
+export async function fetchPdfBufferFromUrl(url: string): Promise<{ buffer: Buffer; source: string }> {
+  const parsed = new URL(url);
+  if (!["http:", "https:"].includes(parsed.protocol)) {
+    throw new Error("Only HTTP(S) URLs are supported.");
   }
 
-  const bytes = Buffer.from(await file.arrayBuffer());
-  const parsed = await pdf(bytes);
-  const pageCount = parsed.numpages ?? 1;
-
-  const uploadDirectory = await ensureUploadDirectory();
-  const uploadId = crypto.randomUUID();
-  const targetPath = path.join(uploadDirectory, `${uploadId}.pdf`);
-  await writeFile(targetPath, bytes);
-
-  return {
-    uploadId,
-    fileName: file.name,
-    pageCount,
-    bytes: file.size
-  };
-}
-
-export async function loadUploadedPdf(uploadId: string, sourceName?: string): Promise<LoadedPdf> {
-  const targetPath = safeUploadPath(uploadId);
-  const buffer = await readFile(targetPath);
-  return {
-    buffer,
-    sourceName: sourceName?.trim() || `${uploadId}.pdf`
-  };
-}
-
-export async function fetchPdfFromUrl(url: string): Promise<LoadedPdf> {
-  let parsedUrl: URL;
-  try {
-    parsedUrl = new URL(url);
-  } catch {
-    throw new Error("Invalid URL.");
-  }
-
-  if (!["http:", "https:"].includes(parsedUrl.protocol)) {
-    throw new Error("Only HTTP/HTTPS URLs are supported.");
-  }
-
-  const response = await fetch(parsedUrl.toString(), {
+  const response = await fetch(parsed.toString(), {
     method: "GET",
-    redirect: "follow"
+    headers: {
+      Accept: "application/pdf"
+    }
   });
 
   if (!response.ok) {
-    throw new Error(`Failed to download PDF. Upstream responded with ${response.status}.`);
+    throw new Error(`Failed to fetch PDF URL (${response.status}).`);
   }
 
-  const contentType = response.headers.get("content-type") ?? "";
-  if (!contentType.includes("pdf") && !parsedUrl.pathname.toLowerCase().endsWith(".pdf")) {
-    throw new Error("URL does not appear to point to a PDF.");
+  const contentLength = Number(response.headers.get("content-length") || "0");
+  if (contentLength > MAX_PDF_BYTES) {
+    throw new Error("The remote PDF is larger than 25MB.");
   }
 
-  const bytes = Buffer.from(await response.arrayBuffer());
-  const fileName = parsedUrl.pathname.split("/").pop() || "document.pdf";
+  const contentType = response.headers.get("content-type") || "";
+  if (!contentType.includes("pdf") && !parsed.pathname.toLowerCase().endsWith(".pdf")) {
+    throw new Error("The provided URL does not appear to be a PDF.");
+  }
+
+  const arrayBuffer = await response.arrayBuffer();
+  const buffer = Buffer.from(arrayBuffer);
+  assertPdfSize(buffer);
+
   return {
-    buffer: bytes,
-    sourceName: fileName
+    buffer,
+    source: parsed.toString()
   };
 }
 
-export interface ProcessedPdfResult extends StructuredDocument {
-  pricing: {
-    pageCount: number;
-    estimatedCostUsd: number;
-  };
-}
+async function extractPdfTextAndPageCount(pdfBuffer: Buffer): Promise<{ text: string; pageCount: number }> {
+  const parser = new PDFParse({ data: pdfBuffer });
 
-export async function processPdfBuffer(buffer: Buffer, sourceName: string): Promise<ProcessedPdfResult> {
-  const parsed = await pdf(buffer);
-  const pageCount = parsed.numpages ?? 1;
-  const rawText = (parsed.text ?? "").trim();
-  const cleanedText = rawText.replace(/\n{3,}/g, "\n\n");
-  const charactersPerPage = cleanedText.length / Math.max(pageCount, 1);
-  const scanned = charactersPerPage < 120;
-
-  let structured: StructuredDocument;
   try {
-    const images = scanned ? await renderPdfPagesForVision(buffer, pageCount) : [];
-    structured = await extractStructuredWithClaude({
-      sourceName,
-      pageCount,
-      plainText: cleanedText,
-      scanned,
-      pageImages: images
-    });
-  } catch {
-    structured = buildFallbackStructure(cleanedText, sourceName, pageCount, scanned);
+    const textResult = await parser.getText();
+    return {
+      text: textResult.text?.trim() || "",
+      pageCount: clampPageCount(textResult.total || textResult.pages?.length || 1)
+    };
+  } finally {
+    await parser.destroy().catch(() => undefined);
+  }
+}
+
+export async function processPdfBuffer({ pdfBuffer, source }: ProcessPdfInput): Promise<PdfStructuredResponse> {
+  assertPdfSize(pdfBuffer);
+
+  let extractedText = "";
+  let pageCount = 1;
+
+  try {
+    const extracted = await extractPdfTextAndPageCount(pdfBuffer);
+    extractedText = extracted.text;
+    pageCount = extracted.pageCount;
+  } catch (error) {
+    extractedText = "";
+    pageCount = 1;
+    console.warn("pdf-parse failed, relying on Claude vision", error);
   }
 
-  structured.document.metadata = {
-    ...structured.document.metadata,
-    extractedAt: new Date().toISOString(),
-    textCharacters: cleanedText.length
-  };
+  const structured = await extractStructuredWithClaude({
+    pdfBuffer,
+    rawText: extractedText,
+    source,
+    pageCount
+  });
 
-  return {
-    ...structured,
-    pricing: {
-      pageCount,
-      estimatedCostUsd: calculatePriceEstimate(pageCount)
-    },
-    document: {
-      ...structured.document,
-      summary: structured.document.summary || "Extraction complete.",
-      metadata: {
-        ...structured.document.metadata,
-        model: structured.document.metadata.model,
-        scanned,
-        fallbackUsed: structured.document.metadata.fallbackUsed,
-        textCharacters: cleanedText.length,
-        inputImageCount: structured.document.metadata.inputImageCount
-      }
+  const response: PdfStructuredResponse = {
+    documentTitle: structured.documentTitle,
+    source: sanitizeSource(source),
+    pageCount,
+    estimatedCostUsd: Number((pageCount * PRICE_PER_PAGE_USD).toFixed(2)),
+    processedAt: new Date().toISOString(),
+    sections: structured.sections,
+    tables: structured.tables,
+    warnings: structured.warnings,
+    model: {
+      provider: structured.fallback ? "local-heuristic" : "anthropic",
+      name: structured.modelName,
+      usedVision: structured.usedVision,
+      fallback: structured.fallback
     }
   };
-}
 
-export async function deleteUploadedPdf(uploadId: string): Promise<void> {
-  const targetPath = safeUploadPath(uploadId);
-  await unlink(targetPath);
+  return sanitizeForResponse(response);
 }

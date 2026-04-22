@@ -1,156 +1,107 @@
-import crypto from "node:crypto";
+import { createHmac, timingSafeEqual } from "node:crypto";
+import { mkdir, readFile, writeFile } from "node:fs/promises";
+import path from "node:path";
 
-export const ACCESS_COOKIE_NAME = "pdf_to_structured_access";
-const ACCESS_TTL_SECONDS = 60 * 60 * 24 * 30;
+export const TOOL_ACCESS_COOKIE = "pdf_tool_access";
 
-interface AccessTokenPayload {
-  email: string;
-  issuedAt: number;
-  expiresAt: number;
-}
+const DATA_DIR = path.join(process.cwd(), ".data");
+const PURCHASE_FILE = path.join(DATA_DIR, "purchases.json");
+
+type PurchaseRecord = {
+  sessionId: string;
+  customerEmail: string | null;
+  amountTotal: number | null;
+  currency: string | null;
+  completedAt: string;
+  mode: "payment" | "subscription";
+};
+
+type PurchaseStore = Record<string, PurchaseRecord>;
+
+const fallbackSigningSecret = "local-dev-signing-secret";
 
 function getSigningSecret(): string {
-  return process.env.STRIPE_WEBHOOK_SECRET ?? "dev-signing-secret-change-me";
+  return process.env.STRIPE_WEBHOOK_SECRET || fallbackSigningSecret;
 }
 
-function toBase64Url(input: string): string {
-  return Buffer.from(input, "utf8").toString("base64url");
+async function ensureStore(): Promise<void> {
+  await mkdir(DATA_DIR, { recursive: true });
+  try {
+    await readFile(PURCHASE_FILE, "utf8");
+  } catch {
+    await writeFile(PURCHASE_FILE, JSON.stringify({}, null, 2), "utf8");
+  }
 }
 
-function fromBase64Url(input: string): string {
-  return Buffer.from(input, "base64url").toString("utf8");
+async function readStore(): Promise<PurchaseStore> {
+  await ensureStore();
+  const raw = await readFile(PURCHASE_FILE, "utf8");
+  try {
+    return JSON.parse(raw) as PurchaseStore;
+  } catch {
+    return {};
+  }
 }
 
-function signTokenPayload(encodedPayload: string): string {
-  return crypto.createHmac("sha256", getSigningSecret()).update(encodedPayload).digest("base64url");
+async function writeStore(store: PurchaseStore): Promise<void> {
+  await ensureStore();
+  await writeFile(PURCHASE_FILE, JSON.stringify(store, null, 2), "utf8");
 }
 
-export function createAccessToken(email: string): string {
-  const now = Math.floor(Date.now() / 1000);
-  const payload: AccessTokenPayload = {
-    email: email.trim().toLowerCase(),
-    issuedAt: now,
-    expiresAt: now + ACCESS_TTL_SECONDS
-  };
-
-  const encoded = toBase64Url(JSON.stringify(payload));
-  const signature = signTokenPayload(encoded);
-  return `${encoded}.${signature}`;
+export async function saveCompletedCheckoutSession(record: PurchaseRecord): Promise<void> {
+  const store = await readStore();
+  store[record.sessionId] = record;
+  await writeStore(store);
 }
 
-export function verifyAccessToken(token: string | undefined | null): AccessTokenPayload | null {
+export async function isSessionPaid(sessionId: string): Promise<boolean> {
+  if (!sessionId) {
+    return false;
+  }
+  const store = await readStore();
+  return Boolean(store[sessionId]);
+}
+
+export function createToolAccessToken(sessionId: string): string {
+  const signature = createHmac("sha256", getSigningSecret()).update(sessionId).digest("hex");
+  return `${sessionId}.${signature}`;
+}
+
+function verifyToolAccessToken(token?: string): string | null {
   if (!token) {
     return null;
   }
 
-  const [encodedPayload, signature] = token.split(".");
-
-  if (!encodedPayload || !signature) {
+  const parts = token.split(".");
+  if (parts.length !== 2) {
     return null;
   }
 
-  const expectedSignature = signTokenPayload(encodedPayload);
-  const provided = Buffer.from(signature);
-  const expected = Buffer.from(expectedSignature);
-
-  if (provided.length !== expected.length || !crypto.timingSafeEqual(provided, expected)) {
+  const [sessionId, signature] = parts;
+  if (!sessionId || !signature) {
     return null;
   }
 
-  try {
-    const payload = JSON.parse(fromBase64Url(encodedPayload)) as AccessTokenPayload;
-    const now = Math.floor(Date.now() / 1000);
-    if (!payload.email || payload.expiresAt <= now) {
-      return null;
-    }
+  const expected = createHmac("sha256", getSigningSecret()).update(sessionId).digest("hex");
+  const actualBuffer = Buffer.from(signature, "utf8");
+  const expectedBuffer = Buffer.from(expected, "utf8");
 
-    return payload;
-  } catch {
-    return null;
-  }
-}
-
-export function extractCookie(cookieHeader: string | null, name: string): string | null {
-  if (!cookieHeader) {
+  if (actualBuffer.length !== expectedBuffer.length) {
     return null;
   }
 
-  const pair = cookieHeader
-    .split(";")
-    .map((chunk) => chunk.trim())
-    .find((chunk) => chunk.startsWith(`${name}=`));
-
-  if (!pair) {
+  if (!timingSafeEqual(actualBuffer, expectedBuffer)) {
     return null;
   }
 
-  const value = pair.slice(name.length + 1);
-  return value ? decodeURIComponent(value) : null;
+  return sessionId;
 }
 
-export function requestHasAccess(cookieHeader: string | null): boolean {
-  const token = extractCookie(cookieHeader, ACCESS_COOKIE_NAME);
-  return verifyAccessToken(token) !== null;
+export async function isToolAccessGranted(token?: string): Promise<boolean> {
+  const sessionId = verifyToolAccessToken(token);
+  if (!sessionId) {
+    return false;
+  }
+
+  return isSessionPaid(sessionId);
 }
-
-function parseStripeSignatureHeader(header: string): { timestamp: string; signatures: string[] } {
-  const pieces = header.split(",");
-  let timestamp = "";
-  const signatures: string[] = [];
-
-  for (const piece of pieces) {
-    const [key, value] = piece.split("=", 2);
-    if (key === "t" && value) {
-      timestamp = value;
-    }
-
-    if (key === "v1" && value) {
-      signatures.push(value);
-    }
-  }
-
-  return { timestamp, signatures };
-}
-
-export function verifyStripeWebhookSignature(payload: string, signatureHeader: string | null): void {
-  const signingSecret = process.env.STRIPE_WEBHOOK_SECRET;
-  if (!signingSecret) {
-    throw new Error("STRIPE_WEBHOOK_SECRET is not configured.");
-  }
-
-  if (!signatureHeader) {
-    throw new Error("Missing Stripe signature header.");
-  }
-
-  const { timestamp, signatures } = parseStripeSignatureHeader(signatureHeader);
-  if (!timestamp || signatures.length === 0) {
-    throw new Error("Malformed Stripe signature header.");
-  }
-
-  const signedPayload = `${timestamp}.${payload}`;
-  const expected = crypto.createHmac("sha256", signingSecret).update(signedPayload).digest("hex");
-  const isValid = signatures.some((signature) => {
-    const expectedBuffer = Buffer.from(expected);
-    const providedBuffer = Buffer.from(signature);
-    return expectedBuffer.length === providedBuffer.length && crypto.timingSafeEqual(expectedBuffer, providedBuffer);
-  });
-
-  if (!isValid) {
-    throw new Error("Invalid Stripe webhook signature.");
-  }
-
-  const timestampSeconds = Number(timestamp);
-  if (!Number.isFinite(timestampSeconds)) {
-    throw new Error("Invalid Stripe timestamp.");
-  }
-
-  const ageSeconds = Math.abs(Math.floor(Date.now() / 1000) - timestampSeconds);
-  if (ageSeconds > 300) {
-    throw new Error("Stripe webhook timestamp is outside the replay window.");
-  }
-}
-
-export function normalizeEmail(email: string): string {
-  return email.trim().toLowerCase();
-}
-

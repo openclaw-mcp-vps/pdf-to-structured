@@ -1,51 +1,80 @@
-import { NextResponse } from "next/server";
-import { requestHasAccess } from "@/lib/lemonsqueezy";
-import { deleteUploadedPdf, fetchPdfFromUrl, loadUploadedPdf, processPdfBuffer } from "@/lib/pdf-processor";
+import { NextResponse, type NextRequest } from "next/server";
+
+import { isToolAccessGranted, TOOL_ACCESS_COOKIE } from "@/lib/lemonsqueezy";
+import { fetchPdfBufferFromUrl, processPdfBuffer } from "@/lib/pdf-processor";
 
 export const runtime = "nodejs";
-export const maxDuration = 300;
 
-interface ProcessRequest {
-  uploadId?: string;
-  sourceName?: string;
-  url?: string;
+function getFileName(fileName: string | undefined): string {
+  if (!fileName) {
+    return "uploaded.pdf";
+  }
+  return fileName.replace(/[^a-zA-Z0-9._-]/g, "-");
 }
 
-export async function POST(request: Request) {
-  let uploadIdToCleanup: string | null = null;
+async function parseIncomingPdf(request: NextRequest): Promise<{ buffer: Buffer; source: string }> {
+  const contentType = request.headers.get("content-type") || "";
+
+  if (contentType.includes("multipart/form-data")) {
+    const formData = await request.formData();
+    const fileEntry = formData.get("file");
+    const urlEntry = String(formData.get("url") || "").trim();
+
+    if (fileEntry instanceof File && fileEntry.size > 0) {
+      if (fileEntry.type && !fileEntry.type.includes("pdf")) {
+        throw new Error("Only PDF files are supported.");
+      }
+
+      const arrayBuffer = await fileEntry.arrayBuffer();
+      return {
+        buffer: Buffer.from(arrayBuffer),
+        source: getFileName(fileEntry.name)
+      };
+    }
+
+    if (urlEntry) {
+      return fetchPdfBufferFromUrl(urlEntry);
+    }
+
+    throw new Error("Please upload a PDF file or provide a PDF URL.");
+  }
+
+  const body = (await request.json()) as { url?: string };
+  const url = body?.url?.trim();
+  if (!url) {
+    throw new Error("Missing PDF URL.");
+  }
+
+  return fetchPdfBufferFromUrl(url);
+}
+
+export async function POST(request: NextRequest): Promise<NextResponse> {
+  const accessToken = request.cookies.get(TOOL_ACCESS_COOKIE)?.value;
+  const hasAccess = await isToolAccessGranted(accessToken);
+
+  if (!hasAccess) {
+    return NextResponse.json(
+      {
+        error: "Purchase required. Complete checkout, then unlock the tool with your Stripe session ID."
+      },
+      { status: 402 }
+    );
+  }
 
   try {
-    if (!requestHasAccess(request.headers.get("cookie"))) {
-      return NextResponse.json(
-        {
-          error: "Payment required. Complete checkout first, then unlock with your purchase email."
-        },
-        { status: 402 }
-      );
-    }
+    const { buffer, source } = await parseIncomingPdf(request);
+    const result = await processPdfBuffer({
+      pdfBuffer: buffer,
+      source
+    });
 
-    const body = (await request.json()) as ProcessRequest;
-    if (!body.uploadId && !body.url) {
-      return NextResponse.json({ error: "Provide either uploadId or url." }, { status: 400 });
-    }
-
-    const loaded = body.uploadId
-      ? await loadUploadedPdf(body.uploadId, body.sourceName)
-      : await fetchPdfFromUrl(body.url ?? "");
-    uploadIdToCleanup = body.uploadId ?? null;
-
-    const structured = await processPdfBuffer(loaded.buffer, loaded.sourceName);
-    return NextResponse.json({ data: structured });
+    return NextResponse.json(result, { status: 200 });
   } catch (error) {
-    const message = error instanceof Error ? error.message : "Processing failed.";
-    return NextResponse.json({ error: message }, { status: 500 });
-  } finally {
-    if (uploadIdToCleanup) {
-      try {
-        await deleteUploadedPdf(uploadIdToCleanup);
-      } catch {
-        // File may already be removed; this should not fail the request.
-      }
-    }
+    return NextResponse.json(
+      {
+        error: error instanceof Error ? error.message : "PDF processing failed."
+      },
+      { status: 400 }
+    );
   }
 }

@@ -11,22 +11,21 @@ NICHE: document-ai
 PRICE: $$0.05/page, $29/mo for 1000 pages/mo
 
 ARCHITECTURE SPEC:
-Next.js app with file upload, Claude Vision API integration for PDF processing, and Lemon Squeezy for payments. Users upload PDFs, get structured JSON output, pay per page with optional subscription.
+Next.js app with file upload, Claude Vision API for PDF processing, and Lemon Squeezy for payments. Frontend handles uploads/URLs, backend processes PDFs through Claude to extract structured data, returns clean JSON with tables/headings/content hierarchy.
 
 PLANNED FILES:
 - app/page.tsx
-- app/api/upload/route.ts
 - app/api/process-pdf/route.ts
 - app/api/webhooks/lemonsqueezy/route.ts
 - components/FileUpload.tsx
 - components/JsonViewer.tsx
 - components/PricingCard.tsx
+- lib/claude.ts
 - lib/pdf-processor.ts
-- lib/claude-client.ts
 - lib/lemonsqueezy.ts
-- lib/database.ts
+- types/pdf-response.ts
 
-DEPENDENCIES: next, tailwindcss, @anthropic-ai/sdk, pdf-parse, pdf2pic, @lemonsqueezy/lemonsqueezy.js, prisma, @prisma/client, uploadthing, react-json-view, lucide-react
+DEPENDENCIES: next, tailwindcss, @anthropic-ai/sdk, pdf-parse, @lemonsqueezy/lemonsqueezy.js, react-dropzone, react-json-view, stripe
 
 REQUIREMENTS:
 - Next.js 15 with App Router (app/ directory)
