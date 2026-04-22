@@ -1,8 +1,10 @@
 "use client";
 
 import { useMemo, useState } from "react";
-import { Button } from "@/components/ui/button";
+import { Check, Copy } from "lucide-react";
+import { JsonView, darkStyles, allExpanded } from "react-json-view-lite";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
+import { Button } from "@/components/ui/button";
 
 interface JsonViewerProps {
   data: unknown;
@@ -10,26 +12,33 @@ interface JsonViewerProps {
 
 export function JsonViewer({ data }: JsonViewerProps) {
   const [copied, setCopied] = useState(false);
-  const formatted = useMemo(() => JSON.stringify(data, null, 2), [data]);
 
-  const onCopy = async () => {
-    await navigator.clipboard.writeText(formatted);
+  const jsonString = useMemo(() => JSON.stringify(data, null, 2), [data]);
+
+  async function copyPayload() {
+    await navigator.clipboard.writeText(jsonString);
     setCopied(true);
-    window.setTimeout(() => setCopied(false), 1600);
-  };
+    window.setTimeout(() => setCopied(false), 1200);
+  }
 
   return (
-    <Card className="border-slate-700/70">
+    <Card className="mt-6">
       <CardHeader className="flex flex-row items-center justify-between gap-4">
-        <CardTitle className="text-lg">Structured JSON Output</CardTitle>
-        <Button variant="outline" size="sm" onClick={onCopy}>
+        <CardTitle>Structured JSON</CardTitle>
+        <Button variant="secondary" size="sm" onClick={copyPayload} className="mono">
+          {copied ? <Check size={14} /> : <Copy size={14} />}
           {copied ? "Copied" : "Copy JSON"}
         </Button>
       </CardHeader>
       <CardContent>
-        <pre className="max-h-[540px] overflow-auto rounded-xl border border-slate-800 bg-black/50 p-4 text-xs leading-relaxed text-slate-200">
-          {formatted}
-        </pre>
+        <div className="max-h-[560px] overflow-auto rounded-lg border border-[var(--border)] bg-[#0a101b] p-3">
+          <JsonView
+            data={data as Record<string, unknown>}
+            shouldExpandNode={allExpanded}
+            style={darkStyles}
+            clickToExpandNode
+          />
+        </div>
       </CardContent>
     </Card>
   );

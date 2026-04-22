@@ -1,215 +1,267 @@
 "use client";
 
-import { FormEvent, useEffect, useState } from "react";
-import { useRouter, useSearchParams } from "next/navigation";
-import { AlertTriangle, FileText, Link as LinkIcon, Loader2, ShieldCheck } from "lucide-react";
-import { Button } from "@/components/ui/button";
+import { type FormEvent, useMemo, useState } from "react";
+import { ExternalLink, FileJson2, Lock, UploadCloud } from "lucide-react";
+import { Button, buttonVariants } from "@/components/ui/button";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
 import { Input } from "@/components/ui/input";
 import { JsonViewer } from "@/components/JsonViewer";
+import { cn } from "@/lib/utils";
 
 interface FileUploadProps {
-  initialAccess: boolean;
-  initialRemainingPages: number;
+  hasAccess: boolean;
+  accessEmail?: string;
 }
 
-interface ProcessingResult {
-  metadata: {
-    source: string;
-    pageCount: number;
-    extractionMode: "native-text" | "vision-fallback";
-    estimatedCostUsd: number;
-  };
-  billing: {
-    pagesCharged: number;
-    pagesRemaining: number;
-    chargeUsd: number;
-    rateUsdPerPage: number;
-  };
-  [key: string]: unknown;
+interface UploadResponse {
+  uploadId: string;
+  fileName: string;
+  pageCount: number;
+  bytes: number;
 }
 
-export function FileUpload({ initialAccess, initialRemainingPages }: FileUploadProps) {
-  const router = useRouter();
-  const searchParams = useSearchParams();
+interface ProcessingPayload {
+  data: Record<string, unknown>;
+}
+
+const paymentLink = process.env.NEXT_PUBLIC_STRIPE_PAYMENT_LINK;
+
+async function parseJsonResponse(response: Response): Promise<Record<string, unknown>> {
+  const payload = (await response.json()) as Record<string, unknown>;
+  if (!response.ok) {
+    const errorMessage = typeof payload.error === "string" ? payload.error : "Request failed.";
+    throw new Error(errorMessage);
+  }
+
+  return payload;
+}
+
+export function FileUpload({ hasAccess, accessEmail }: FileUploadProps) {
+  const [mode, setMode] = useState<"file" | "url">("file");
   const [file, setFile] = useState<File | null>(null);
   const [url, setUrl] = useState("");
-  const [processing, setProcessing] = useState(false);
-  const [activating, setActivating] = useState(false);
-  const [access, setAccess] = useState(initialAccess);
-  const [remainingPages, setRemainingPages] = useState(initialRemainingPages);
-  const [error, setError] = useState<string | null>(null);
-  const [result, setResult] = useState<ProcessingResult | null>(null);
+  const [busy, setBusy] = useState(false);
+  const [unlockBusy, setUnlockBusy] = useState(false);
+  const [unlockEmail, setUnlockEmail] = useState("");
+  const [status, setStatus] = useState("");
+  const [error, setError] = useState("");
+  const [result, setResult] = useState<Record<string, unknown> | null>(null);
+  const [lastUpload, setLastUpload] = useState<UploadResponse | null>(null);
 
-  const accessToken = searchParams.get("access_token");
-
-  useEffect(() => {
-    const activate = async () => {
-      if (!accessToken) {
-        return;
-      }
-
-      setActivating(true);
-      setError(null);
-      try {
-        const response = await fetch("/api/access/activate", {
-          method: "POST",
-          headers: {
-            "Content-Type": "application/json"
-          },
-          body: JSON.stringify({ token: accessToken })
-        });
-
-        const payload = (await response.json()) as {
-          success?: boolean;
-          error?: string;
-          remainingPages?: number;
-        };
-
-        if (!response.ok || !payload.success) {
-          throw new Error(payload.error || "Payment confirmation still pending.");
-        }
-
-        setAccess(true);
-        setRemainingPages(payload.remainingPages ?? 0);
-        router.replace("/upload");
-      } catch (err) {
-        setError(err instanceof Error ? err.message : "Unable to activate access.");
-      } finally {
-        setActivating(false);
-      }
-    };
-
-    void activate();
-  }, [accessToken, router]);
-
-  const handleSubmit = async (event: FormEvent<HTMLFormElement>) => {
-    event.preventDefault();
-
-    if (!file && !url.trim()) {
-      setError("Upload a PDF file or provide a PDF URL.");
-      return;
+  const estimatedUploadCost = useMemo(() => {
+    if (!lastUpload) {
+      return null;
     }
 
-    setProcessing(true);
-    setError(null);
+    return Number((lastUpload.pageCount * 0.05).toFixed(2));
+  }, [lastUpload]);
+
+  async function handleUnlockSubmit(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    setUnlockBusy(true);
+    setError("");
+    setStatus("");
+
+    try {
+      const response = await fetch("/api/paywall/unlock", {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json"
+        },
+        body: JSON.stringify({ email: unlockEmail })
+      });
+
+      await parseJsonResponse(response);
+      setStatus("Access unlocked. Loading tool...");
+      window.location.reload();
+    } catch (unlockError) {
+      setError(unlockError instanceof Error ? unlockError.message : "Unable to unlock access.");
+    } finally {
+      setUnlockBusy(false);
+    }
+  }
+
+  async function handleProcessSubmit(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    setBusy(true);
+    setError("");
+    setStatus("");
     setResult(null);
 
     try {
-      const formData = new FormData();
-      if (file) {
+      let processRequestBody: Record<string, unknown>;
+      if (mode === "file") {
+        if (!file) {
+          throw new Error("Select a PDF file first.");
+        }
+
+        setStatus("Uploading PDF...");
+        const formData = new FormData();
         formData.append("file", file);
-      }
-      if (url.trim()) {
-        formData.append("url", url.trim());
+        const uploadResponse = await fetch("/api/upload", {
+          method: "POST",
+          body: formData
+        });
+        const uploadPayload = (await parseJsonResponse(uploadResponse)) as unknown as UploadResponse;
+        setLastUpload(uploadPayload);
+
+        processRequestBody = {
+          uploadId: uploadPayload.uploadId,
+          sourceName: uploadPayload.fileName
+        };
+      } else {
+        if (!url.trim()) {
+          throw new Error("Paste a PDF URL first.");
+        }
+
+        processRequestBody = {
+          url: url.trim()
+        };
       }
 
-      const response = await fetch("/api/process-pdf", {
+      setStatus("Extracting headings, lists, and table rows...");
+      const processResponse = await fetch("/api/process-pdf", {
         method: "POST",
-        body: formData
+        headers: {
+          "Content-Type": "application/json"
+        },
+        body: JSON.stringify(processRequestBody)
       });
 
-      const payload = (await response.json()) as ProcessingResult & { error?: string; pagesRemaining?: number };
-      if (!response.ok) {
-        throw new Error(payload.error || "Processing failed.");
-      }
-
-      setResult(payload);
-      setRemainingPages(payload.billing.pagesRemaining);
-    } catch (err) {
-      setError(err instanceof Error ? err.message : "Processing failed.");
+      const payload = (await parseJsonResponse(processResponse)) as unknown as ProcessingPayload;
+      setResult(payload.data);
+      setStatus("Extraction complete.");
+    } catch (processingError) {
+      setError(processingError instanceof Error ? processingError.message : "Processing failed.");
     } finally {
-      setProcessing(false);
+      setBusy(false);
     }
-  };
+  }
 
-  return (
-    <div className="space-y-6">
-      <Card className="border-slate-700/70">
+  if (!hasAccess) {
+    return (
+      <Card>
         <CardHeader>
-          <div className="flex items-center justify-between gap-4">
-            <div>
-              <CardTitle className="text-2xl">Process a PDF</CardTitle>
-              <CardDescription>
-                Upload a file or paste a URL. We return nested JSON with sections, list items, and table rows.
-              </CardDescription>
-            </div>
-            <div className="rounded-lg border border-slate-700 bg-slate-900 px-3 py-2 text-xs text-slate-200">
-              {access ? `${remainingPages} pages remaining` : "Locked"}
-            </div>
-          </div>
+          <CardTitle className="flex items-center gap-2 text-2xl">
+            <Lock size={20} className="text-[var(--brand)]" />
+            Tool Access Is Locked
+          </CardTitle>
+          <CardDescription>
+            Purchase access first, then unlock this browser using the same checkout email.
+          </CardDescription>
         </CardHeader>
-        <CardContent>
-          {!access ? (
-            <div className="rounded-lg border border-red-400/30 bg-red-400/10 p-4 text-sm text-red-200">
-              <p className="font-semibold">Access required</p>
-              <p className="mt-1">Complete checkout from the pricing section on the homepage to unlock processing.</p>
-              <a href="/" className="mt-3 inline-block text-red-100 underline underline-offset-4">
-                Go to pricing
-              </a>
-            </div>
-          ) : null}
+        <CardContent className="space-y-6">
+          <div className="rounded-lg border border-[var(--border)] bg-[#0b1322] p-4">
+            <p className="text-sm text-[var(--text-secondary)]">
+              Buy with Stripe Checkout, then return here and unlock. Your access cookie lasts 30 days.
+            </p>
+            <a
+              href={paymentLink}
+              target="_blank"
+              rel="noreferrer"
+              className={cn(buttonVariants({ size: "lg" }), "mt-4 w-full")}
+            >
+              Buy Access
+              <ExternalLink size={16} />
+            </a>
+          </div>
 
-          <form className="mt-6 space-y-4" onSubmit={handleSubmit}>
-            <label className="space-y-2 text-sm text-slate-300">
-              <span className="flex items-center gap-2 font-medium text-slate-200">
-                <FileText className="size-4" /> PDF file
-              </span>
-              <Input
-                type="file"
-                accept="application/pdf"
-                onChange={(event) => setFile(event.target.files?.[0] ?? null)}
-                disabled={!access || processing}
-              />
+          <form onSubmit={handleUnlockSubmit} className="space-y-3">
+            <label htmlFor="unlock-email" className="block text-sm text-[var(--text-secondary)]">
+              Purchase email
             </label>
-
-            <div className="text-center text-xs uppercase tracking-[0.18em] text-slate-500">or</div>
-
-            <label className="space-y-2 text-sm text-slate-300">
-              <span className="flex items-center gap-2 font-medium text-slate-200">
-                <LinkIcon className="size-4" /> PDF URL
-              </span>
-              <Input
-                type="url"
-                value={url}
-                onChange={(event) => setUrl(event.target.value)}
-                placeholder="https://example.com/invoice.pdf"
-                disabled={!access || processing}
-              />
-            </label>
-
-            <Button className="w-full" size="lg" type="submit" disabled={!access || processing || activating}>
-              {processing ? (
-                <span className="flex items-center gap-2">
-                  <Loader2 className="size-4 animate-spin" /> Extracting structured JSON...
-                </span>
-              ) : activating ? (
-                <span className="flex items-center gap-2">
-                  <Loader2 className="size-4 animate-spin" /> Activating access...
-                </span>
-              ) : (
-                "Extract Structured JSON"
-              )}
+            <Input
+              id="unlock-email"
+              type="email"
+              required
+              value={unlockEmail}
+              onChange={(event) => setUnlockEmail(event.target.value)}
+              placeholder="you@company.com"
+            />
+            <Button type="submit" className="w-full" disabled={unlockBusy}>
+              {unlockBusy ? "Checking purchase..." : "Unlock Tool"}
             </Button>
           </form>
 
-          {error ? (
-            <div className="mt-4 flex items-start gap-2 rounded-lg border border-red-500/40 bg-red-500/10 p-3 text-sm text-red-200">
-              <AlertTriangle className="mt-0.5 size-4 shrink-0" />
-              <p>{error}</p>
-            </div>
-          ) : null}
+          {error ? <p className="text-sm text-[var(--danger)]">{error}</p> : null}
+          {status ? <p className="text-sm text-[var(--success)]">{status}</p> : null}
+        </CardContent>
+      </Card>
+    );
+  }
 
-          {result ? (
-            <div className="mt-4 rounded-lg border border-emerald-500/40 bg-emerald-500/10 p-4 text-sm text-emerald-100">
-              <p className="flex items-center gap-2 font-semibold">
-                <ShieldCheck className="size-4" /> Extraction complete
-              </p>
-              <p className="mt-1">
-                Processed {result.metadata.pageCount} pages via {result.metadata.extractionMode} at ${result.billing.rateUsdPerPage.toFixed(2)}
-                /page.
-              </p>
-            </div>
+  return (
+    <div className="space-y-6">
+      <Card>
+        <CardHeader>
+          <CardTitle className="flex items-center gap-2 text-2xl">
+            <FileJson2 size={20} className="text-[var(--brand)]" />
+            Convert PDF to Structured JSON
+          </CardTitle>
+          <CardDescription>
+            Signed in as <span className="mono text-[var(--text-primary)]">{accessEmail}</span>. Upload a PDF file or
+            paste a PDF URL.
+          </CardDescription>
+        </CardHeader>
+        <CardContent>
+          <div className="mb-4 flex gap-2">
+            <Button
+              variant={mode === "file" ? "default" : "secondary"}
+              onClick={() => setMode("file")}
+              disabled={busy}
+              className="flex-1"
+            >
+              Upload PDF
+            </Button>
+            <Button
+              variant={mode === "url" ? "default" : "secondary"}
+              onClick={() => setMode("url")}
+              disabled={busy}
+              className="flex-1"
+            >
+              PDF URL
+            </Button>
+          </div>
+
+          <form onSubmit={handleProcessSubmit} className="space-y-4">
+            {mode === "file" ? (
+              <label className="flex cursor-pointer flex-col items-center justify-center rounded-lg border border-dashed border-[var(--border)] bg-[#0b1322] p-6 text-center">
+                <UploadCloud size={28} className="mb-2 text-[var(--brand)]" />
+                <span className="text-sm text-[var(--text-secondary)]">
+                  {file ? `${file.name} (${Math.round(file.size / 1024)} KB)` : "Click to choose a PDF"}
+                </span>
+                <Input
+                  className="sr-only"
+                  type="file"
+                  accept="application/pdf"
+                  onChange={(event) => setFile(event.target.files?.[0] ?? null)}
+                />
+              </label>
+            ) : (
+              <div className="space-y-2">
+                <label htmlFor="pdf-url" className="block text-sm text-[var(--text-secondary)]">
+                  Public PDF URL
+                </label>
+                <Input
+                  id="pdf-url"
+                  value={url}
+                  onChange={(event) => setUrl(event.target.value)}
+                  placeholder="https://example.com/document.pdf"
+                />
+              </div>
+            )}
+
+            <Button type="submit" size="lg" className="w-full" disabled={busy}>
+              {busy ? "Processing..." : "Extract Structured JSON"}
+            </Button>
+          </form>
+
+          {status ? <p className="mt-4 text-sm text-[var(--success)]">{status}</p> : null}
+          {error ? <p className="mt-4 text-sm text-[var(--danger)]">{error}</p> : null}
+          {estimatedUploadCost !== null ? (
+            <p className="mt-4 text-sm text-[var(--text-secondary)]">
+              Last upload: {lastUpload?.pageCount} pages, estimated pay-as-you-go cost <span className="mono">${estimatedUploadCost.toFixed(2)}</span>
+            </p>
           ) : null}
         </CardContent>
       </Card>

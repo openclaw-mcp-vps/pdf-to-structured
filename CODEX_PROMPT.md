@@ -11,11 +11,11 @@ NICHE: document-ai
 PRICE: $$0.05/page, $29/mo for 1000 pages/mo
 
 ARCHITECTURE SPEC:
-Next.js app with file upload, Claude Vision API integration for PDF processing, and Lemon Squeezy for payments. Simple pay-per-use model with optional subscription tiers.
+Next.js app with file upload, Claude Vision API integration for PDF processing, and Lemon Squeezy for payments. Users upload PDFs, get structured JSON output, pay per page with optional subscription.
 
 PLANNED FILES:
 - app/page.tsx
-- app/upload/page.tsx
+- app/api/upload/route.ts
 - app/api/process-pdf/route.ts
 - app/api/webhooks/lemonsqueezy/route.ts
 - components/FileUpload.tsx
@@ -26,7 +26,7 @@ PLANNED FILES:
 - lib/lemonsqueezy.ts
 - lib/database.ts
 
-DEPENDENCIES: next, tailwindcss, @anthropic-ai/sdk, pdf-parse, pdf2pic, @lemonsqueezy/lemonsqueezy.js, prisma, @prisma/client, uploadthing, react-json-view, stripe
+DEPENDENCIES: next, tailwindcss, @anthropic-ai/sdk, pdf-parse, pdf2pic, @lemonsqueezy/lemonsqueezy.js, prisma, @prisma/client, uploadthing, react-json-view, lucide-react
 
 REQUIREMENTS:
 - Next.js 15 with App Router (app/ directory)
@@ -34,7 +34,7 @@ REQUIREMENTS:
 - Tailwind CSS v4
 - shadcn/ui components (npx shadcn@latest init, then add needed components)
 - Dark theme ONLY — background #0d1117, no light mode
-- Lemon Squeezy checkout overlay for payments
+- Stripe Payment Link for payments (hosted checkout — use the URL directly as the Buy button href)
 - Landing page that converts: hero, problem, solution, pricing, FAQ
 - The actual tool/feature behind a paywall (cookie-based access after purchase)
 - Mobile responsive
@@ -54,9 +54,13 @@ REQUIREMENTS:
   to package.json dependencies and re-run npm install + npm run build until it passes.
 
 ENVIRONMENT VARIABLES (create .env.example):
-- NEXT_PUBLIC_LEMON_SQUEEZY_STORE_ID
-- NEXT_PUBLIC_LEMON_SQUEEZY_PRODUCT_ID
-- LEMON_SQUEEZY_WEBHOOK_SECRET
+- NEXT_PUBLIC_STRIPE_PAYMENT_LINK  (full URL, e.g. https://buy.stripe.com/test_XXX)
+- NEXT_PUBLIC_STRIPE_PUBLISHABLE_KEY  (pk_test_... or pk_live_...)
+- STRIPE_WEBHOOK_SECRET  (set when webhook is wired)
+
+BUY BUTTON RULE: the Buy button's href MUST be `process.env.NEXT_PUBLIC_STRIPE_PAYMENT_LINK`
+used as-is — do NOT construct URLs from a product ID, do NOT prepend any base URL,
+do NOT wrap it in an embed iframe. The link opens Stripe's hosted checkout directly.
 
 After creating all files:
 1. Run: npm install

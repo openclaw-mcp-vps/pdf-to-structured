@@ -1,39 +1,46 @@
 import type { Metadata } from "next";
-import Script from "next/script";
+import { IBM_Plex_Mono, Space_Grotesk } from "next/font/google";
 import "./globals.css";
 
-const siteUrl = "https://pdf-to-structured.com";
+const spaceGrotesk = Space_Grotesk({
+  subsets: ["latin"],
+  variable: "--font-space-grotesk"
+});
+
+const ibmPlexMono = IBM_Plex_Mono({
+  subsets: ["latin"],
+  weight: ["400", "500", "600"],
+  variable: "--font-ibm-plex-mono"
+});
 
 export const metadata: Metadata = {
-  metadataBase: new URL(siteUrl),
-  title: "PDF to Structured JSON | Table + Section Extraction for Dev Pipelines",
+  metadataBase: new URL(process.env.NEXT_PUBLIC_SITE_URL ?? "http://localhost:3000"),
+  title: {
+    default: "PDF to Structured JSON",
+    template: "%s | PDF to Structured JSON"
+  },
   description:
-    "Upload any PDF or paste a URL and get hierarchical JSON with tables, headings, paragraphs, and lists. Built for document-processing pipelines. $0.05/page.",
+    "Upload a PDF or paste a URL and extract hierarchical JSON with clean sections, lists, and table data.",
   keywords: [
+    "pdf extraction",
     "pdf to json",
     "document ai",
     "table extraction",
-    "claude vision",
-    "structured output",
-    "pdf parser api"
+    "claude vision"
   ],
   openGraph: {
     title: "PDF to Structured JSON",
     description:
-      "Transform messy PDFs into clean nested JSON with tables and section hierarchy.",
-    url: siteUrl,
-    siteName: "PDF to Structured",
-    type: "website"
+      "Convert messy PDFs into pipeline-ready JSON with heading hierarchy, clean paragraphs, and table rows.",
+    type: "website",
+    url: "/",
+    siteName: "PDF to Structured JSON"
   },
   twitter: {
     card: "summary_large_image",
     title: "PDF to Structured JSON",
     description:
-      "Extract tables, headings, lists, and paragraphs from PDFs into production-ready JSON."
-  },
-  robots: {
-    index: true,
-    follow: true
+      "Upload any PDF and get clean nested JSON with sections, lists, and extracted table rows."
   }
 };
 
@@ -43,11 +50,9 @@ export default function RootLayout({
   children: React.ReactNode;
 }>) {
   return (
-    <html lang="en">
-      <body>
-        {children}
-        <Script src="https://app.lemonsqueezy.com/js/lemon.js" strategy="afterInteractive" />
-      </body>
+    <html lang="en" suppressHydrationWarning>
+      <body className={`${spaceGrotesk.variable} ${ibmPlexMono.variable} antialiased`}>{children}</body>
     </html>
   );
 }
+

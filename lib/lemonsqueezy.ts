@@ -1,166 +1,156 @@
 import crypto from "node:crypto";
-import { createPendingAccessToken, markAccessPaid, PlanType } from "@/lib/database";
 
-const checkoutApiUrl = "https://api.lemonsqueezy.com/v1/checkouts";
+export const ACCESS_COOKIE_NAME = "pdf_to_structured_access";
+const ACCESS_TTL_SECONDS = 60 * 60 * 24 * 30;
 
-export function verifyLemonSignature(rawBody: string, signature: string | null, secret: string | undefined) {
-  if (!signature || !secret) {
-    return false;
-  }
-
-  const digest = crypto.createHmac("sha256", secret).update(rawBody).digest("hex");
-  if (digest.length !== signature.length) {
-    return false;
-  }
-
-  return crypto.timingSafeEqual(Buffer.from(digest), Buffer.from(signature));
+interface AccessTokenPayload {
+  email: string;
+  issuedAt: number;
+  expiresAt: number;
 }
 
-export function createAccessToken() {
-  return crypto.randomUUID().replace(/-/g, "");
+function getSigningSecret(): string {
+  return process.env.STRIPE_WEBHOOK_SECRET ?? "dev-signing-secret-change-me";
 }
 
-export async function createHostedCheckout(params: {
-  token: string;
-  plan: PlanType;
-  email?: string;
-  requestOrigin: string;
-}) {
-  const apiKey = process.env.LEMON_SQUEEZY_API_KEY;
-  const storeId = process.env.NEXT_PUBLIC_LEMON_SQUEEZY_STORE_ID;
-  const paygVariantId = process.env.NEXT_PUBLIC_LEMON_SQUEEZY_PRODUCT_ID;
-  const subscriptionVariantId =
-    process.env.NEXT_PUBLIC_LEMON_SQUEEZY_SUBSCRIPTION_PRODUCT_ID ?? paygVariantId;
-  const variantId = params.plan === "subscription" ? subscriptionVariantId : paygVariantId;
-
-  if (!apiKey || !storeId || !variantId) {
-    throw new Error("Missing Lemon Squeezy environment variables.");
-  }
-
-  await createPendingAccessToken(params.token, params.plan);
-
-  const pagesForPlan = params.plan === "subscription" ? 1000 : 200;
-  const redirectUrl = `${params.requestOrigin}/upload?access_token=${params.token}`;
-
-  const body = {
-    data: {
-      type: "checkouts",
-      attributes: {
-        checkout_data: {
-          email: params.email,
-          custom: {
-            access_token: params.token,
-            plan: params.plan,
-            pages: String(pagesForPlan)
-          }
-        },
-        checkout_options: {
-          embed: true,
-          media: false,
-          logo: true
-        },
-        product_options: {
-          redirect_url: redirectUrl
-        }
-      },
-      relationships: {
-        store: {
-          data: {
-            type: "stores",
-            id: storeId
-          }
-        },
-        variant: {
-          data: {
-            type: "variants",
-            id: variantId
-          }
-        }
-      }
-    }
-  };
-
-  const response = await fetch(checkoutApiUrl, {
-    method: "POST",
-    headers: {
-      Authorization: `Bearer ${apiKey}`,
-      Accept: "application/vnd.api+json",
-      "Content-Type": "application/vnd.api+json"
-    },
-    body: JSON.stringify(body)
-  });
-
-  if (!response.ok) {
-    const detail = await response.text();
-    throw new Error(`Lemon checkout creation failed: ${response.status} ${detail}`);
-  }
-
-  const payload = (await response.json()) as {
-    data?: {
-      attributes?: {
-        url?: string;
-      };
-    };
-  };
-
-  const checkoutUrl = payload.data?.attributes?.url;
-  if (!checkoutUrl) {
-    throw new Error("No checkout URL returned by Lemon Squeezy.");
-  }
-
-  return { checkoutUrl, pagesForPlan };
+function toBase64Url(input: string): string {
+  return Buffer.from(input, "utf8").toString("base64url");
 }
 
-interface LemonWebhookPayload {
-  meta?: {
-    event_name?: string;
-    custom_data?: Record<string, unknown>;
-  };
-  data?: {
-    id?: string;
-    attributes?: {
-      identifier?: string;
-      user_email?: string;
-      custom_data?: Record<string, unknown>;
-    };
-  };
+function fromBase64Url(input: string): string {
+  return Buffer.from(input, "base64url").toString("utf8");
 }
 
-export async function processLemonWebhook(payload: LemonWebhookPayload) {
-  const eventName = payload.meta?.event_name ?? "unknown";
-  const orderId = payload.data?.attributes?.identifier ?? payload.data?.id;
+function signTokenPayload(encodedPayload: string): string {
+  return crypto.createHmac("sha256", getSigningSecret()).update(encodedPayload).digest("base64url");
+}
 
-  const fromMeta = payload.meta?.custom_data ?? {};
-  const fromAttrs = payload.data?.attributes?.custom_data ?? {};
-  const token =
-    (fromMeta.access_token as string | undefined) ?? (fromAttrs.access_token as string | undefined) ?? "";
+export function createAccessToken(email: string): string {
+  const now = Math.floor(Date.now() / 1000);
+  const payload: AccessTokenPayload = {
+    email: email.trim().toLowerCase(),
+    issuedAt: now,
+    expiresAt: now + ACCESS_TTL_SECONDS
+  };
 
+  const encoded = toBase64Url(JSON.stringify(payload));
+  const signature = signTokenPayload(encoded);
+  return `${encoded}.${signature}`;
+}
+
+export function verifyAccessToken(token: string | undefined | null): AccessTokenPayload | null {
   if (!token) {
-    return { handled: false, reason: "No access token in webhook custom data." };
+    return null;
   }
 
-  const plan = ((fromMeta.plan as string | undefined) ?? (fromAttrs.plan as string | undefined) ?? "payg") as PlanType;
-  const pages = Number((fromMeta.pages as string | undefined) ?? (fromAttrs.pages as string | undefined) ?? "200");
+  const [encodedPayload, signature] = token.split(".");
 
-  const paidEvents = new Set([
-    "order_created",
-    "order_refunded_reverted",
-    "subscription_created",
-    "subscription_payment_success",
-    "subscription_payment_recovered"
-  ]);
-
-  if (!paidEvents.has(eventName)) {
-    return { handled: false, reason: `Event ${eventName} does not grant access.` };
+  if (!encodedPayload || !signature) {
+    return null;
   }
 
-  await markAccessPaid({
-    token,
-    orderId,
-    email: payload.data?.attributes?.user_email,
-    pagesPurchased: Number.isFinite(pages) && pages > 0 ? pages : plan === "subscription" ? 1000 : 200,
-    plan
+  const expectedSignature = signTokenPayload(encodedPayload);
+  const provided = Buffer.from(signature);
+  const expected = Buffer.from(expectedSignature);
+
+  if (provided.length !== expected.length || !crypto.timingSafeEqual(provided, expected)) {
+    return null;
+  }
+
+  try {
+    const payload = JSON.parse(fromBase64Url(encodedPayload)) as AccessTokenPayload;
+    const now = Math.floor(Date.now() / 1000);
+    if (!payload.email || payload.expiresAt <= now) {
+      return null;
+    }
+
+    return payload;
+  } catch {
+    return null;
+  }
+}
+
+export function extractCookie(cookieHeader: string | null, name: string): string | null {
+  if (!cookieHeader) {
+    return null;
+  }
+
+  const pair = cookieHeader
+    .split(";")
+    .map((chunk) => chunk.trim())
+    .find((chunk) => chunk.startsWith(`${name}=`));
+
+  if (!pair) {
+    return null;
+  }
+
+  const value = pair.slice(name.length + 1);
+  return value ? decodeURIComponent(value) : null;
+}
+
+export function requestHasAccess(cookieHeader: string | null): boolean {
+  const token = extractCookie(cookieHeader, ACCESS_COOKIE_NAME);
+  return verifyAccessToken(token) !== null;
+}
+
+function parseStripeSignatureHeader(header: string): { timestamp: string; signatures: string[] } {
+  const pieces = header.split(",");
+  let timestamp = "";
+  const signatures: string[] = [];
+
+  for (const piece of pieces) {
+    const [key, value] = piece.split("=", 2);
+    if (key === "t" && value) {
+      timestamp = value;
+    }
+
+    if (key === "v1" && value) {
+      signatures.push(value);
+    }
+  }
+
+  return { timestamp, signatures };
+}
+
+export function verifyStripeWebhookSignature(payload: string, signatureHeader: string | null): void {
+  const signingSecret = process.env.STRIPE_WEBHOOK_SECRET;
+  if (!signingSecret) {
+    throw new Error("STRIPE_WEBHOOK_SECRET is not configured.");
+  }
+
+  if (!signatureHeader) {
+    throw new Error("Missing Stripe signature header.");
+  }
+
+  const { timestamp, signatures } = parseStripeSignatureHeader(signatureHeader);
+  if (!timestamp || signatures.length === 0) {
+    throw new Error("Malformed Stripe signature header.");
+  }
+
+  const signedPayload = `${timestamp}.${payload}`;
+  const expected = crypto.createHmac("sha256", signingSecret).update(signedPayload).digest("hex");
+  const isValid = signatures.some((signature) => {
+    const expectedBuffer = Buffer.from(expected);
+    const providedBuffer = Buffer.from(signature);
+    return expectedBuffer.length === providedBuffer.length && crypto.timingSafeEqual(expectedBuffer, providedBuffer);
   });
 
-  return { handled: true, token, plan };
+  if (!isValid) {
+    throw new Error("Invalid Stripe webhook signature.");
+  }
+
+  const timestampSeconds = Number(timestamp);
+  if (!Number.isFinite(timestampSeconds)) {
+    throw new Error("Invalid Stripe timestamp.");
+  }
+
+  const ageSeconds = Math.abs(Math.floor(Date.now() / 1000) - timestampSeconds);
+  if (ageSeconds > 300) {
+    throw new Error("Stripe webhook timestamp is outside the replay window.");
+  }
 }
+
+export function normalizeEmail(email: string): string {
+  return email.trim().toLowerCase();
+}
+
